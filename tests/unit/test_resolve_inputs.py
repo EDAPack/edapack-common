@@ -146,3 +146,12 @@ def test_untracked_input_excluded_from_digest():
 def test_github_slug():
     assert ri._github_slug("https://github.com/a/b.git") == "a/b"
     assert ri._github_slug("git@github.com:a/b") == "a/b"
+
+
+def test_version_strips_nonnumeric_prefix():
+    # tags come in several shapes across the tools
+    assert ri._strip_v("v5.038") == "5.038"
+    assert ri._strip_v("nextpnr-0.10") == "0.10"
+    assert ri._strip_v("yosys-0.50") == "0.50"
+    assert ri._strip_v("v13_0") == "13_0"
+    assert ri._strip_v("main") == "main"  # no digits -> unchanged

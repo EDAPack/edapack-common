@@ -97,7 +97,14 @@ def _version_sort_key(tag: str):
 
 
 def _strip_v(s: str) -> str:
-    return s[1:] if re.match(r"^v\d", s) else s
+    """Derive a clean version from a tag/ref.
+
+    Strips a leading non-numeric prefix up to the first digit, so `v5.038`,
+    `nextpnr-0.10`, and `yosys-0.50` become `5.038`, `0.10`, `0.50`. A ref with
+    no digits (e.g. a branch name) is returned unchanged.
+    """
+    m = re.search(r"\d.*$", s)
+    return m.group(0) if m else s
 
 
 def resolve_ref(backend, repo: str, ref: str) -> tuple[str, str]:
