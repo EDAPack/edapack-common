@@ -1,0 +1,35 @@
+name: selftest
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install test deps
+        run: pip install pytest jsonschema
+      - name: Syntax-check shell
+        run: |
+          for f in scripts/*.sh tests/shell/*.sh; do bash -n "$f"; done
+      - name: Python unit + schema + skills tests
+        run: python3 -m pytest tests -q
+      - name: Shell library tests
+        run: bash tests/shell/test_build_common.sh
+      - name: Validate workflow YAML
+        run: |
+          python3 - <<'PY'
+          import sys, pathlib
+          try:
+              import yaml
+          except ImportError:
+              sys.exit(0)
+          for p in pathlib.Path(".github/workflows").glob("*.yml"):
+              yaml.safe_load(p.read_text())
+              print("ok:", p)
+          PY

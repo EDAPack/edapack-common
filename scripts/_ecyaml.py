@@ -1,0 +1,116 @@
+"""Tiny dependency-free YAML subset parser shared by the edapack build tools.
+
+The manylinux build containers don't have PyYAML, and we don't want to add a
+third-party dependency to the release path. We only consume YAML we author
+ourselves (`build-inputs.yaml`, `skill-manifest.yaml`, SKILL.md frontmatter),
+so a small, predictable subset is enough.
+
+Supported:
+    key: value
+    key: [a, b, c]            # one-line flow list of scalars
+    block:                    # nested dict or list, one level deeper
+      - name: x
+        repo: y
+    # comments and blank lines
+
+Scalars are coerced: ints, floats, true/false, null/~, quoted strings.
+Anything else stays a string.
+"""
+
+from __future__ import annotations
+
+import re
+
+_FRONT_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n", re.DOTALL)
+
+
+def parse_scalar(v: str):
+    v = v.strip()
+    if v.startswith("[") and v.endswith("]"):
+        body = v[1:-1].strip()
+        if not body:
+            return []
+        return [parse_scalar(p) for p in body.split(",")]
+    if (v.startswith('"') and v.endswith('"')) or (
+        v.startswith("'") and v.endswith("'")
+    ):
+        return v[1:-1]
+    if v.lower() in {"true", "false"}:
+        return v.lower() == "true"
+    if v.lower() in {"null", "~", ""}:
+        return None
+    try:
+        return int(v)
+    except ValueError:
+        pass
+    try:
+        return float(v)
+    except ValueError:
+        pass
+    return v
+
+
+def parse_simple_yaml(text: str) -> dict:
+    """Parse the supported YAML subset into nested dict/list structures."""
+    root: dict = {}
+    stack: list = [(0, root)]  # (indent, container)
+    lines = text.splitlines()
+    i = 0
+    while i < len(lines):
+        raw = lines[i]
+        stripped = raw.strip()
+        if not stripped or stripped.startswith("#"):
+            i += 1
+            continue
+        indent = len(raw) - len(raw.lstrip(" "))
+        while stack and indent < stack[-1][0]:
+            stack.pop()
+        container = stack[-1][1]
+
+        if stripped.startswith("- "):
+            item_body = stripped[2:]
+            if isinstance(container, list):
+                if ":" in item_body:
+                    k, v = item_body.split(":", 1)
+                    item: dict = {}
+                    item[k.strip()] = parse_scalar(v.strip())
+                    container.append(item)
+                    stack.append((indent + 2, item))
+                else:
+                    container.append(parse_scalar(item_body))
+            else:
+                raise ValueError(f"unexpected list item at line {i + 1}: {raw!r}")
+        elif ":" in stripped:
+            k, v = stripped.split(":", 1)
+            k = k.strip()
+            v = v.strip()
+            if v == "":
+                j = i + 1
+                while j < len(lines) and not lines[j].strip():
+                    j += 1
+                if j < len(lines) and lines[j].lstrip().startswith("- "):
+                    new: list = []
+                else:
+                    new = {}
+                if isinstance(container, dict):
+                    container[k] = new
+                else:
+                    raise ValueError(f"key in non-dict at line {i + 1}")
+                stack.append((indent + 2, new))
+            else:
+                if isinstance(container, dict):
+                    container[k] = parse_scalar(v)
+                else:
+                    raise ValueError(f"key in non-dict at line {i + 1}")
+        else:
+            raise ValueError(f"cannot parse line {i + 1}: {raw!r}")
+        i += 1
+    return root
+
+
+def parse_frontmatter(text: str) -> dict:
+    """Extract and parse the leading `--- ... ---` YAML frontmatter block."""
+    m = _FRONT_RE.match(text)
+    if not m:
+        raise ValueError("missing YAML frontmatter")
+    return parse_simple_yaml(m.group(1))

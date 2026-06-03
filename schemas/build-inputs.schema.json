@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://edapack.github.io/schemas/build-inputs.schema.json",
+  "title": "edapack build-inputs",
+  "description": "Declarative description of a tool's input components, resolved by resolve-inputs.py.",
+  "type": "object",
+  "required": ["schema", "core"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": { "const": "edapack.build-inputs/1" },
+    "core": { "$ref": "#/$defs/input" },
+    "dependencies": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/input" },
+      "default": []
+    }
+  },
+  "$defs": {
+    "input": {
+      "type": "object",
+      "required": ["name", "repo", "policy"],
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^[a-zA-Z0-9._-]+$",
+          "description": "Unique input name; used as the manifest key."
+        },
+        "repo": {
+          "type": "string",
+          "description": "Git URL used to resolve refs (git ls-remote / releases API)."
+        },
+        "policy": {
+          "type": "string",
+          "pattern": "^(branch:.+|tag:.+|latest-release|latest-tag)$",
+          "description": "Resolution policy: branch:<b> | tag:<t> | latest-release | latest-tag."
+        },
+        "track": {
+          "type": "boolean",
+          "default": true,
+          "description": "If false, recorded in the manifest but excluded from inputs_digest (no change-gate trigger)."
+        }
+      }
+    }
+  }
+}

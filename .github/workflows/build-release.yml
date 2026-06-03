@@ -1,0 +1,237 @@
+name: edapack build-release
+
+# Reusable workflow: resolve inputs -> change-gate -> build matrix -> publish.
+# Each tool repo calls this from a thin ci.yml. See docs/dev/releasing.md.
+on:
+  workflow_call:
+    inputs:
+      package:
+        description: "Package name, e.g. verilator-bin"
+        required: true
+        type: string
+      images:
+        description: 'JSON array of manylinux image short-names, e.g. ["manylinux_2_28_x86_64"]'
+        required: true
+        type: string
+      core_ref:
+        description: "Override core input ref (tag/branch/sha)"
+        required: false
+        type: string
+        default: ""
+      input_overrides:
+        description: "JSON map of dependency name -> ref"
+        required: false
+        type: string
+        default: "{}"
+      force:
+        description: "Build even if inputs unchanged"
+        required: false
+        type: boolean
+        default: false
+      prerelease:
+        description: "Mark the release as prerelease"
+        required: false
+        type: boolean
+        default: true
+      common_ref:
+        description: "edapack-common ref to use for shared scripts"
+        required: false
+        type: string
+        default: "v1"
+
+permissions:
+  contents: write
+
+jobs:
+  # --------------------------------------------------------------------- #
+  # resolve: cheap, no build. Resolves input versions and decides whether a
+  # release is needed by diffing against the last published manifest.
+  # --------------------------------------------------------------------- #
+  resolve:
+    runs-on: ubuntu-latest
+    outputs:
+      build_needed: ${{ steps.gate.outputs.build_needed }}
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+      changed_summary: ${{ steps.gate.outputs.changed_summary }}
+    steps:
+      - name: Checkout tool repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Checkout edapack-common
+        uses: actions/checkout@v4
+        with:
+          repository: edapack/edapack-common
+          ref: ${{ inputs.common_ref }}
+          path: .edapack-common
+
+      - name: Resolve inputs
+        id: resolve
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          recipe_sha="$(git rev-parse HEAD)"
+          overrides_args=()
+          if [ -n "${{ inputs.core_ref }}" ]; then
+            overrides_args+=(--core-ref "${{ inputs.core_ref }}")
+          fi
+          python3 .edapack-common/scripts/resolve-inputs.py \
+            --build-inputs build-inputs.yaml \
+            --recipe-sha "$recipe_sha" \
+            --overrides-json '${{ inputs.input_overrides }}' \
+            "${overrides_args[@]}" \
+            --output candidate.json
+          cat candidate.json
+
+      - name: Fetch last release manifest
+        id: prev
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Pull manifest.json from the latest release, if any.
+          if gh release view --repo "${{ github.repository }}" \
+               --json tagName -q .tagName > /dev/null 2>&1; then
+            gh release download --repo "${{ github.repository }}" \
+              --pattern manifest.json --dir prev || true
+          fi
+          if [ -f prev/manifest.json ]; then
+            echo "previous=prev/manifest.json" >> "$GITHUB_OUTPUT"
+          else
+            echo "previous=none" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Change gate
+        id: gate
+        run: |
+          pinned=""
+          if [ -n "${{ inputs.core_ref }}" ] || [ "${{ inputs.input_overrides }}" != "{}" ]; then
+            pinned="--pinned"
+          fi
+          force=""
+          if [ "${{ inputs.force }}" = "true" ]; then force="--force"; fi
+          python3 .edapack-common/scripts/manifest-diff.py \
+            --candidate candidate.json \
+            --previous "${{ steps.prev.outputs.previous }}" \
+            --trigger "${{ github.event_name == 'schedule' && 'schedule' || (github.event_name == 'workflow_dispatch' && 'workflow_dispatch' || 'push') }}" \
+            $force $pinned \
+            --github-output "$GITHUB_OUTPUT"
+
+      - name: Compute version
+        id: version
+        run: |
+          core_ver="$(python3 -c 'import json,sys; d=json.load(open("candidate.json")); print(next(i["version"] or "0" for i in d["inputs"] if i["role"]=="core"))')"
+          date="$(date -u +%Y%m%d)"
+          version="${core_ver}.${date}"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "tag=v${version}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload candidate
+        if: steps.gate.outputs.build_needed == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: candidate
+          path: candidate.json
+
+  # --------------------------------------------------------------------- #
+  # build: one job per manylinux image. Runs the tool's build.sh inside the
+  # rootless builder image; emits a per-platform tarball + manifest.
+  # --------------------------------------------------------------------- #
+  build:
+    needs: resolve
+    if: needs.resolve.outputs.build_needed == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        image: ${{ fromJson(inputs.images) }}
+    container:
+      image: ghcr.io/edapack/${{ matrix.image }}:latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/checkout@v4
+        with:
+          repository: edapack/edapack-common
+          ref: ${{ inputs.common_ref }}
+          path: .edapack-common
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: candidate
+
+      - name: Build
+        env:
+          EC_COMMON: ${{ github.workspace }}/.edapack-common
+          EC_PACKAGE: ${{ inputs.package }}
+          EC_VERSION: ${{ needs.resolve.outputs.version }}
+          EC_TAG: ${{ needs.resolve.outputs.tag }}
+          EC_TRIGGER: ${{ github.event_name == 'schedule' && 'schedule' || (github.event_name == 'workflow_dispatch' && 'workflow_dispatch' || 'push') }}
+          EC_IMAGE_NAME: ${{ matrix.image }}
+          core_ref: ${{ inputs.core_ref }}
+          input_overrides: ${{ inputs.input_overrides }}
+          CANDIDATE_JSON: ${{ github.workspace }}/candidate.json
+        run: |
+          export EC_RECIPE_SHA="$(git rev-parse HEAD)"
+          export SRC_DIR="$PWD" WORK_DIR="$RUNNER_TEMP/work" OUT_DIR="$PWD/dist"
+          bash scripts/build.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.image }}
+          path: dist/
+
+  # --------------------------------------------------------------------- #
+  # publish: merge per-platform manifests, create the release, upload assets.
+  # --------------------------------------------------------------------- #
+  publish:
+    needs: [resolve, build]
+    if: needs.resolve.outputs.build_needed == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: edapack/edapack-common
+          ref: ${{ inputs.common_ref }}
+          path: .edapack-common
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Merge manifests
+        run: |
+          # Each release-<image>/ contains one platform manifest.json (renamed
+          # to avoid collision) plus the tarball.
+          manifests=$(find artifacts -name 'manifest-*.json' -print)
+          python3 .edapack-common/scripts/gen-manifest.py merge \
+            $(for m in $manifests; do echo --manifest "$m"; done) \
+            --output manifest.json
+          mkdir -p upload
+          find artifacts -name '*.tar.gz' -exec cp {} upload/ \;
+          find artifacts -name '*.sha256' -exec cp {} upload/ \;
+          cp manifest.json upload/
+
+      - name: Create release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          notes_file="$(mktemp)"
+          {
+            echo "Automated build of ${{ inputs.package }} ${{ needs.resolve.outputs.version }}."
+            echo
+            echo "### Input changes since last release"
+            echo
+            echo "${{ needs.resolve.outputs.changed_summary }}"
+          } > "$notes_file"
+          flags=""
+          if [ "${{ inputs.prerelease }}" = "true" ]; then flags="--prerelease"; fi
+          gh release create "${{ needs.resolve.outputs.tag }}" \
+            --repo "${{ github.repository }}" \
+            --title "${{ inputs.package }} ${{ needs.resolve.outputs.version }}" \
+            --notes-file "$notes_file" \
+            $flags \
+            upload/*
