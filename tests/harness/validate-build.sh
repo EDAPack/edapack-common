@@ -77,6 +77,7 @@ for ((i=0;i<${#args[@]};i++)); do case "${args[$i]}" in
   --install) mode="install"; prefix_dir="${args[$((i+1))]}";;
 esac; done
 if [ "$mode" = "configure" ]; then mkdir -p "$build"; echo "$prefix" > "$build/.prefix";
+  [ -n "$prefix" ] && echo "$prefix" > "$EC_FAKE_STATE/prefix"   # for a later `make install`
 elif [ "$mode" = "build" ]; then prefix="$(cat "$build/.prefix" 2>/dev/null)";
   mkdir -p "$prefix/bin" "$prefix/share"
   for b in $EC_FAKE_BINS; do printf '#!/bin/sh\necho fake %s\n' "$b" > "$prefix/bin/$b"; chmod +x "$prefix/bin/$b"; done

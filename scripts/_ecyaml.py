@@ -24,7 +24,25 @@ import re
 _FRONT_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n", re.DOTALL)
 
 
+def strip_inline_comment(v: str) -> str:
+    """Remove a trailing ` # ...` inline comment, honoring quotes.
+
+    YAML only treats `#` as a comment when preceded by whitespace, so `a:b#c`
+    and URLs are safe, but `value  # note` and `[a, b] # note` are trimmed.
+    """
+    in_s = in_d = False
+    for i, ch in enumerate(v):
+        if ch == "'" and not in_d:
+            in_s = not in_s
+        elif ch == '"' and not in_s:
+            in_d = not in_d
+        elif ch == "#" and not in_s and not in_d and i > 0 and v[i - 1] in " \t":
+            return v[:i].rstrip()
+    return v
+
+
 def parse_scalar(v: str):
+    v = strip_inline_comment(v.strip())
     v = v.strip()
     if v.startswith("[") and v.endswith("]"):
         body = v[1:-1].strip()
@@ -83,7 +101,7 @@ def parse_simple_yaml(text: str) -> dict:
         elif ":" in stripped:
             k, v = stripped.split(":", 1)
             k = k.strip()
-            v = v.strip()
+            v = strip_inline_comment(v.strip()).strip()
             if v == "":
                 j = i + 1
                 while j < len(lines) and not lines[j].strip():
