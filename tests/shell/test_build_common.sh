@@ -108,5 +108,34 @@ PY
     EC_PACKAGE=p EC_VERSION=1 EC_TAG=v1 ec_finalize_release "$SRC_DIR" "$rel" "$cand" >/dev/null 2>&1
 ) && bad "ec_finalize_release should fail on missing binary" || ok "ec_finalize_release fails on missing skill binary"
 
+# --- ec_input_get / ec_core_get ---------------------------------------------
+(
+    CANDIDATE_JSON="$SANDBOX/cand.json"
+    cat > "$CANDIDATE_JSON" <<'JSON'
+{"inputs_digest":"sha256:x","inputs":[
+  {"name":"verilator","role":"core","resolved_sha":"aaaa1111","version":"5.038"},
+  {"name":"bitwuzla","role":"dependency","resolved_sha":"bbbb2222","version":"0.6.0"}]}
+JSON
+    [ "$(ec_input_get verilator resolved_sha)" = "aaaa1111" ] || exit 1
+    [ "$(ec_input_get bitwuzla version)" = "0.6.0" ] || exit 1
+    [ "$(ec_core_get version)" = "5.038" ] || exit 1
+    [ "$(ec_core_get resolved_sha)" = "aaaa1111" ] || exit 1
+) && ok "ec_input_get/ec_core_get read fields from candidate" || bad "ec_input_get/ec_core_get"
+
+# --- ec_prepare_candidate derives version from a provided candidate ----------
+(
+    SRC_DIR="$SANDBOX/pc"; WORK_DIR="$SANDBOX/pcw"; OUT_DIR="$SANDBOX/pco"
+    ec_init_dirs >/dev/null
+    CANDIDATE_JSON="$SANDBOX/cand.json"   # reuse the one above
+    cat > "$CANDIDATE_JSON" <<'JSON'
+{"inputs_digest":"sha256:x","inputs":[{"name":"verilator","role":"core","resolved_sha":"aaaa1111","version":"5.038"}]}
+JSON
+    unset EC_VERSION EC_TAG
+    EC_RECIPE_SHA=deadbeef ec_prepare_candidate >/dev/null
+    # version must be 5.038.<8-digit-date>
+    echo "$EC_VERSION" | grep -qE '^5\.038\.[0-9]{8}$' || exit 1
+    [ "$EC_TAG" = "v$EC_VERSION" ] || exit 1
+) && ok "ec_prepare_candidate derives <core>.<date> version" || bad "ec_prepare_candidate version"
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

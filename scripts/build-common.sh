@@ -64,6 +64,60 @@ ec_clone_input() {
     printf '%s\n' "$dest"
 }
 
+# ec_input_get NAME FIELD  — read inputs[NAME].FIELD from $CANDIDATE_JSON.
+ec_input_get() {
+    python3 - "$CANDIDATE_JSON" "$1" "$2" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+for i in d["inputs"]:
+    if i["name"] == sys.argv[2]:
+        print(i.get(sys.argv[3]) or ""); break
+PY
+}
+
+# ec_core_get FIELD  — read the core input's FIELD from $CANDIDATE_JSON.
+ec_core_get() {
+    python3 - "$CANDIDATE_JSON" "$1" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+for i in d["inputs"]:
+    if i.get("role") == "core":
+        print(i.get(sys.argv[2]) or ""); break
+PY
+}
+
+# ec_prepare_candidate — ensure CANDIDATE_JSON + release metadata are set,
+# whether invoked from CI (everything provided) or locally (resolve here).
+# Sets/export: CANDIDATE_JSON, EC_RECIPE_SHA, EC_VERSION, EC_TAG.
+# Honors the `core_ref` and `input_overrides` env vars for local pinned builds.
+ec_prepare_candidate() {
+    : "${EC_RECIPE_SHA:=$(git -C "$SRC_DIR" rev-parse HEAD 2>/dev/null || echo local)}"
+    if [ -z "${CANDIDATE_JSON:-}" ] || [ ! -f "${CANDIDATE_JSON:-}" ]; then
+        CANDIDATE_JSON="$WORK_DIR/candidate.json"
+        local extra=()
+        [ -n "${core_ref:-}" ] && extra+=(--core-ref "$core_ref")
+        [ -n "${input_overrides:-}" ] && [ "${input_overrides}" != "{}" ] \
+            && extra+=(--overrides-json "$input_overrides")
+        ec_log "resolving inputs locally -> $CANDIDATE_JSON"
+        python3 "$EC_COMMON/scripts/resolve-inputs.py" \
+            --build-inputs "$SRC_DIR/build-inputs.yaml" \
+            --recipe-sha "$EC_RECIPE_SHA" \
+            "${extra[@]}" \
+            --output "$CANDIDATE_JSON"
+    fi
+    export CANDIDATE_JSON EC_RECIPE_SHA
+    if [ -z "${EC_VERSION:-}" ]; then
+        local core_ver date
+        core_ver="$(ec_core_get version)"
+        [ -n "$core_ver" ] || core_ver="0"
+        date="$(date -u +%Y%m%d)"
+        EC_VERSION="${core_ver}.${date}"
+        EC_TAG="v${EC_VERSION}"
+    fi
+    export EC_VERSION EC_TAG
+    ec_log "version=$EC_VERSION recipe_sha=$EC_RECIPE_SHA"
+}
+
 # ec_require_file PATH [DESCRIPTION]  — hard-fail if a release artifact is missing.
 ec_require_file() {
     local path="$1" desc="${2:-$1}"
