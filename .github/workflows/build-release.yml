@@ -1,7 +1,11 @@
 name: edapack build-release
 
 # Reusable workflow: resolve inputs -> change-gate -> build matrix -> publish.
-# Each tool repo calls this from a thin ci.yml. See docs/dev/releasing.md.
+# Each tool repo calls this from a thin ci.yml. The shared scripts are delivered
+# via ivpm (edapack-common is an ivpm dependency of each tool, fetched into
+# packages/edapack-common), and builds run in the STOCK manylinux images
+# (quay.io/pypa/*) installing their deps at build time — no custom images.
+# See https://edapack.github.io (Developer Guide → releasing).
 on:
   workflow_call:
     inputs:
@@ -33,20 +37,14 @@ on:
         required: false
         type: boolean
         default: true
-      common_ref:
-        description: "edapack-common ref to use for shared scripts"
-        required: false
-        type: string
-        default: "v1"
 
 permissions:
   contents: write
-  packages: read
 
 jobs:
   # --------------------------------------------------------------------- #
-  # resolve: cheap, no build. Resolves input versions and decides whether a
-  # release is needed by diffing against the last published manifest.
+  # resolve: fetch edapack-common (via ivpm), resolve input versions, and
+  # decide whether a release is needed by diffing the last published manifest.
   # --------------------------------------------------------------------- #
   resolve:
     runs-on: ubuntu-latest
@@ -56,31 +54,31 @@ jobs:
       tag: ${{ steps.version.outputs.tag }}
       changed_summary: ${{ steps.gate.outputs.changed_summary }}
     steps:
-      - name: Checkout tool repo
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Checkout edapack-common
-        uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
-          repository: edapack/edapack-common
-          ref: ${{ inputs.common_ref }}
-          path: .edapack-common
+          python-version: "3.12"
+
+      - name: Fetch edapack-common via ivpm
+        run: |
+          pip install ivpm
+          ivpm update -a --skip-py-install
+          test -f packages/edapack-common/scripts/resolve-inputs.py
 
       - name: Resolve inputs
         id: resolve
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          recipe_sha="$(git rev-parse HEAD)"
+          EC=packages/edapack-common
           overrides_args=()
-          if [ -n "${{ inputs.core_ref }}" ]; then
-            overrides_args+=(--core-ref "${{ inputs.core_ref }}")
-          fi
-          python3 .edapack-common/scripts/resolve-inputs.py \
+          [ -n "${{ inputs.core_ref }}" ] && overrides_args+=(--core-ref "${{ inputs.core_ref }}")
+          python3 "$EC/scripts/resolve-inputs.py" \
             --build-inputs build-inputs.yaml \
-            --recipe-sha "$recipe_sha" \
+            --recipe-sha "$(git rev-parse HEAD)" \
             --overrides-json '${{ inputs.input_overrides }}' \
             "${overrides_args[@]}" \
             --output candidate.json
@@ -91,28 +89,18 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # Pull manifest.json from the latest release, if any.
-          if gh release view --repo "${{ github.repository }}" \
-               --json tagName -q .tagName > /dev/null 2>&1; then
-            gh release download --repo "${{ github.repository }}" \
-              --pattern manifest.json --dir prev || true
+          if gh release view --repo "${{ github.repository }}" --json tagName -q .tagName >/dev/null 2>&1; then
+            gh release download --repo "${{ github.repository }}" --pattern manifest.json --dir prev || true
           fi
-          if [ -f prev/manifest.json ]; then
-            echo "previous=prev/manifest.json" >> "$GITHUB_OUTPUT"
-          else
-            echo "previous=none" >> "$GITHUB_OUTPUT"
-          fi
+          [ -f prev/manifest.json ] && echo "previous=prev/manifest.json" >> "$GITHUB_OUTPUT" || echo "previous=none" >> "$GITHUB_OUTPUT"
 
       - name: Change gate
         id: gate
         run: |
-          pinned=""
-          if [ -n "${{ inputs.core_ref }}" ] || [ "${{ inputs.input_overrides }}" != "{}" ]; then
-            pinned="--pinned"
-          fi
-          force=""
-          if [ "${{ inputs.force }}" = "true" ]; then force="--force"; fi
-          python3 .edapack-common/scripts/manifest-diff.py \
+          EC=packages/edapack-common
+          pinned=""; [ -n "${{ inputs.core_ref }}" ] || [ "${{ inputs.input_overrides }}" != "{}" ] && pinned="--pinned"
+          force="";  [ "${{ inputs.force }}" = "true" ] && force="--force"
+          python3 "$EC/scripts/manifest-diff.py" \
             --candidate candidate.json \
             --previous "${{ steps.prev.outputs.previous }}" \
             --trigger "${{ github.event_name == 'schedule' && 'schedule' || (github.event_name == 'workflow_dispatch' && 'workflow_dispatch' || 'push') }}" \
@@ -122,9 +110,8 @@ jobs:
       - name: Compute version
         id: version
         run: |
-          core_ver="$(python3 -c 'import json,sys; d=json.load(open("candidate.json")); print(next(i["version"] or "0" for i in d["inputs"] if i["role"]=="core"))')"
-          date="$(date -u +%Y%m%d)"
-          version="${core_ver}.${date}"
+          core_ver="$(python3 -c 'import json; d=json.load(open("candidate.json")); print(next(i["version"] or "0" for i in d["inputs"] if i["role"]=="core"))')"
+          version="${core_ver}.$(date -u +%Y%m%d)"
           echo "version=${version}" >> "$GITHUB_OUTPUT"
           echo "tag=v${version}" >> "$GITHUB_OUTPUT"
 
@@ -136,12 +123,10 @@ jobs:
           path: candidate.json
 
   # --------------------------------------------------------------------- #
-  # build: one job per manylinux image. We check out on the host runner and
-  # `docker run` the builder image as a step — rather than using `container:`
-  # — because actions' node20 needs glibc >= 2.28 and would fail inside the
-  # older manylinux2014 image. This mirrors the proven cibuildwheel pattern and
-  # local-build.sh. The build runs as the runner UID so outputs stay readable
-  # by later steps (the prebaked image needs no root to install packages).
+  # build: one job per manylinux image. Stock quay.io/pypa image, deps
+  # installed at build time (EC_INSTALL_DEPS=1). We `docker run` from the host
+  # runner rather than using `container:` because actions' node20 needs glibc
+  # >= 2.28 and would fail inside manylinux2014.
   # --------------------------------------------------------------------- #
   build:
     needs: resolve
@@ -156,46 +141,42 @@ jobs:
         with:
           fetch-depth: 0
 
-      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
-          repository: edapack/edapack-common
-          ref: ${{ inputs.common_ref }}
-          path: .edapack-common
+          python-version: "3.12"
+
+      - name: Fetch edapack-common via ivpm
+        run: |
+          pip install ivpm
+          ivpm update -a --skip-py-install
+          test -f packages/edapack-common/scripts/build-common.sh
 
       - uses: actions/download-artifact@v4
         with:
           name: candidate
 
-      - name: Log in to GHCR (pull builder image)
-        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
-
-      - name: Build in builder image
+      - name: Build in stock manylinux image
         env:
           EC_PACKAGE: ${{ inputs.package }}
           EC_VERSION: ${{ needs.resolve.outputs.version }}
           EC_TAG: ${{ needs.resolve.outputs.tag }}
           EC_TRIGGER: ${{ github.event_name == 'schedule' && 'schedule' || (github.event_name == 'workflow_dispatch' && 'workflow_dispatch' || 'push') }}
           EC_IMAGE_NAME: ${{ matrix.image }}
-          IMAGE: ghcr.io/edapack/${{ matrix.image }}:latest
         run: |
-          mkdir -p work dist
+          mkdir -p dist
           docker run --rm \
-            --user "$(id -u):$(id -g)" \
-            -v "$PWD:/src:ro" \
-            -v "$PWD/work:/work" \
-            -v "$PWD/dist:/dist" \
-            -e SRC_DIR=/src -e WORK_DIR=/work -e OUT_DIR=/dist \
-            -e EC_COMMON=/src/.edapack-common \
+            -v "$PWD:/src" \
+            -e SRC_DIR=/src -e WORK_DIR=/tmp/ecwork -e OUT_DIR=/src/dist \
+            -e EC_COMMON=/src/packages/edapack-common \
+            -e EC_INSTALL_DEPS=1 \
             -e CANDIDATE_JSON=/src/candidate.json \
             -e EC_PACKAGE -e EC_VERSION -e EC_TAG -e EC_TRIGGER -e EC_IMAGE_NAME \
             -e EC_RECIPE_SHA="$(git rev-parse HEAD)" \
             -e core_ref="${{ inputs.core_ref }}" \
             -e input_overrides='${{ inputs.input_overrides }}' \
-            "$IMAGE" \
+            "quay.io/pypa/${{ matrix.image }}" \
             bash /src/scripts/build.sh
-
-      - name: List build outputs
-        run: ls -l dist/   # expect tarball, .sha256, and manifest-<image>.json
+          ls -l dist/
 
       - uses: actions/upload-artifact@v4
         with:
@@ -211,45 +192,39 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
-          repository: edapack/edapack-common
-          ref: ${{ inputs.common_ref }}
-          path: .edapack-common
-
+          python-version: "3.12"
+      - name: Fetch edapack-common via ivpm
+        run: |
+          pip install ivpm
+          ivpm update -a --skip-py-install
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
-
       - name: Merge manifests
         run: |
-          # Each release-<image>/ contains one platform manifest.json (renamed
-          # to avoid collision) plus the tarball.
           manifests=$(find artifacts -name 'manifest-*.json' -print)
-          python3 .edapack-common/scripts/gen-manifest.py merge \
+          python3 packages/edapack-common/scripts/gen-manifest.py merge \
             $(for m in $manifests; do echo --manifest "$m"; done) \
             --output manifest.json
           mkdir -p upload
           find artifacts -name '*.tar.gz' -exec cp {} upload/ \;
           find artifacts -name '*.sha256' -exec cp {} upload/ \;
           cp manifest.json upload/
-
       - name: Create release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          notes_file="$(mktemp)"
+          notes="$(mktemp)"
           {
             echo "Automated build of ${{ inputs.package }} ${{ needs.resolve.outputs.version }}."
-            echo
-            echo "### Input changes since last release"
-            echo
+            echo; echo "### Input changes since last release"; echo
             echo "${{ needs.resolve.outputs.changed_summary }}"
-          } > "$notes_file"
-          flags=""
-          if [ "${{ inputs.prerelease }}" = "true" ]; then flags="--prerelease"; fi
+          } > "$notes"
+          flags=""; [ "${{ inputs.prerelease }}" = "true" ] && flags="--prerelease"
           gh release create "${{ needs.resolve.outputs.tag }}" \
             --repo "${{ github.repository }}" \
             --title "${{ inputs.package }} ${{ needs.resolve.outputs.version }}" \
-            --notes-file "$notes_file" \
-            $flags \
+            --notes-file "$notes" $flags \
             upload/*

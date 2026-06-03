@@ -181,7 +181,7 @@ ec_platform_json() {
             *2014*) libc="glibc_2.17" ;;
             *)      libc="unknown" ;;
         esac
-        image="ghcr.io/edapack/${EC_IMAGE_NAME}"
+        image="quay.io/pypa/${EC_IMAGE_NAME}"
     else
         libc="$(ldd --version 2>/dev/null | head -1 | grep -oE '[0-9]+\.[0-9]+' | head -1 | sed 's/^/glibc_/' || echo unknown)"
         image="local"

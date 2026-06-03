@@ -1,8 +1,10 @@
 # Bootstrapping `edapack-common` on GitHub
 
 This repo is implemented and tested locally. To make it usable by the tool repos
-(Phase 1+), it needs to be published and its builder images built. These steps
-require your GitHub credentials, so run them yourself.
+(Phase 1+), publish it and tag a `v1`. There are **no custom container images to
+build** — tool builds run in the stock `quay.io/pypa/manylinux*` images and the
+shared scripts are delivered to each tool via ivpm (`edapack-common` is an ivpm
+dependency, fetched into `packages/edapack-common`).
 
 ## 1. Create the repo and push
 
@@ -15,7 +17,7 @@ gh repo create edapack/edapack-common --public --source=. --remote=origin --push
 ```
 
 The default branch is `main`. The `selftest` workflow runs on push and should go
-green (46 pytest + 7 shell tests + lint).
+green (52 pytest + 9 shell tests + lint).
 
 ## 2. Tag `v1`
 
@@ -31,40 +33,21 @@ a non-breaking change you want the tools to pick up. Cut `v2` for breaking
 changes to the reusable workflow inputs, the `ec_*` shell API, or the manifest
 schema.
 
-## 3. Build & publish the builder images
+## 3. Verify a tool build (optional)
 
-The `builder-images` workflow builds one rootless manylinux image per variant and
-pushes to GHCR. Trigger it once:
+Trigger any tool's CI (e.g. push to `verilator-bin`, or run its workflow
+manually). The reusable workflow will:
 
-```sh
-gh workflow run builder-images.yml --repo edapack/edapack-common
-```
-
-Then **make the resulting packages public** (Org → Packages → each
-`manylinux_*` package → Package settings → Change visibility → Public), or the
-tool builds must authenticate to pull them. The tool `build` jobs do `docker
-login ghcr.io` with `GITHUB_TOKEN` and request `packages: read`, so private also
-works within the org — public is simplest.
-
-Images land at:
-
-```
-ghcr.io/edapack/manylinux_2_28_x86_64:latest
-ghcr.io/edapack/manylinux_2_34_x86_64:latest
-ghcr.io/edapack/manylinux2014_x86_64:latest
-```
-
-## 4. Verify before Phase 1
-
-- `selftest` green on `main`.
-- `v1` tag exists.
-- The three `ghcr.io/edapack/manylinux_*` images exist and are pullable.
-
-Once these hold, the tool repos can adopt the reusable workflow (Phase 1).
+1. `pip install ivpm && ivpm update -a --skip-py-install` → fetches
+   `edapack-common` into `packages/`;
+2. resolve inputs + change-gate;
+3. build each manylinux image via `docker run quay.io/pypa/<image>` (deps
+   installed at build time);
+4. publish a release with `manifest.json`.
 
 ## Org / naming notes
 
 - The GitHub org is **`edapack`** (lowercase — matches the tool repos'
-  `git@github.com:edapack/<tool>-bin` remotes and GHCR's lowercase requirement).
-- All reusable-workflow `uses:` and `ghcr.io/edapack/...` references use that
-  lowercase path.
+  `git@github.com:edapack/<tool>-bin` remotes).
+- Each tool's `ci.yml` references `edapack/edapack-common@v1`, and its
+  `ivpm.yaml` lists `edapack-common` so `ivpm update` fetches it locally.

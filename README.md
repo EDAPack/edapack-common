@@ -13,9 +13,7 @@ See **[design](../BUILD_CENTRALIZATION_DESIGN.md)** and
 
 | Path | Purpose |
 |---|---|
-| `.github/workflows/build-release.yml` | Reusable workflow: resolve → change-gate → build matrix → publish. Tool repos call this from a thin `ci.yml`. |
-| `.github/workflows/builder-images.yml` | Builds & pushes the rootless manylinux builder images to GHCR. |
-| `docker/Dockerfile` | Parametric builder image (one `BASE_IMAGE` per manylinux variant). |
+| `.github/workflows/build-release.yml` | Reusable workflow: resolve → change-gate → build matrix → publish, in stock `quay.io/pypa/manylinux*` images. Tool repos call this from a thin `ci.yml`. |
 | `scripts/resolve-inputs.py` | Resolve `build-inputs.yaml` (+ overrides) to commit SHAs and an `inputs_digest`. |
 | `scripts/gen-manifest.py` | Assemble per-tarball `manifest.json`; merge into a top-level release manifest. |
 | `scripts/manifest-diff.py` | The change-gate: decide `build_needed` by diffing input digests. |
@@ -34,17 +32,24 @@ See **[design](../BUILD_CENTRALIZATION_DESIGN.md)** and
   build, with an `inputs_digest` used to gate weekly releases. Schema:
   `schemas/manifest.schema.json`.
 
-## Local build (rootless)
+## Local build
+
+First fetch the shared scripts into the tool repo (one time / when they change):
 
 ```sh
-# from a checkout of edapack-common, next to the tool repos:
+cd ../verilator-bin && ivpm update -a     # populates packages/edapack-common
+```
+
+Then build in the stock manylinux image:
+
+```sh
 scripts/local-build.sh ../verilator-bin          # build -> ../verilator-bin/dist/
 scripts/local-build.sh ../verilator-bin clean    # remove work volume + dist (no sudo)
 ```
 
-The build runs in a manylinux container, writes scratch to a named docker
-volume (never the workspace), and lands the tarball + manifest in the tool's
-`dist/`. Nothing root-owned ends up in your tree.
+The build runs in `quay.io/pypa/manylinux*` (installing deps at build time),
+writes scratch to a named docker volume (never the workspace), and lands the
+tarball + manifest in the tool's `dist/`. Cleanup is always sudo-free.
 
 ## Tests
 
