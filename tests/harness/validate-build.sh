@@ -38,14 +38,20 @@ sub="$1"; shift || true
 case "$sub" in
   clone)
     dest="${@: -1}"
-    mkdir -p "$dest"
+    mkdir -p "$dest/contrib" "$dest/dash" "$dest/scripts" "$dest/build"
     cat > "$dest/configure" <<'CFG'
 #!/usr/bin/env bash
 for a in "$@"; do case "$a" in --prefix=*) echo "${a#--prefix=}" > "$EC_FAKE_STATE/prefix";; esac; done
 CFG
     chmod +x "$dest/configure"
+    printf '#!/bin/sh\nmkdir -p build\n' > "$dest/configure.sh"; chmod +x "$dest/configure.sh"
     printf '#!/bin/sh\n:\n' > "$dest/autoconf.sh"; chmod +x "$dest/autoconf.sh"
-    : > "$dest/CMakeLists.txt"
+    printf '#!/bin/sh\n:\n' > "$dest/contrib/setup-lingeling.sh"
+    printf '#!/bin/sh\n:\n' > "$dest/contrib/setup-btor2tools.sh"
+    chmod +x "$dest/contrib/"*.sh
+    : > "$dest/CMakeLists.txt"; : > "$dest/dash/.keep"; : > "$dest/scripts/.keep"
+    printf '#!/usr/bin/env python3\n' > "$dest/mcy.py"
+    printf '#!/usr/bin/env python3\n' > "$dest/mcy-dash.py"
     ;;
   -C) d="$1"; shift; real="$1"; shift || true
       case "$real" in rev-parse) echo "0000000000000000000000000000000000000000";; esac ;;
@@ -57,15 +63,45 @@ EOF
 
 cat > "$BIN/make" <<'EOF'
 #!/usr/bin/env bash
-for a in "$@"; do
-  if [ "$a" = "install" ]; then
-    prefix="$(cat "$EC_FAKE_STATE/prefix" 2>/dev/null)"
-    [ -n "$prefix" ] || prefix="$EC_FAKE_STATE/defprefix"
-    mkdir -p "$prefix/bin" "$prefix/share"
-    for b in $EC_FAKE_BINS; do printf '#!/bin/sh\necho fake %s\n' "$b" > "$prefix/bin/$b"; chmod +x "$prefix/bin/$b"; done
-  fi
-done
+# honor -C <dir>, PREFIX=<dir>, and `install`; always drop the expected build
+# artifacts so subsequent `cp build/x` / `cp bin/x` steps succeed.
+cdir="."; prefix=""; install=0; args=("$@")
+for ((i=0;i<${#args[@]};i++)); do case "${args[$i]}" in
+  -C) cdir="${args[$((i+1))]}";;
+  install) install=1;;
+  PREFIX=*) prefix="${args[$i]#PREFIX=}";;
+esac; done
+mkdir -p "$cdir/bin" "$cdir/build"
+: > "$cdir/build/slang.so"
+for b in $EC_FAKE_BINS; do printf '#!/bin/sh\n:\n' > "$cdir/bin/$b"; chmod +x "$cdir/bin/$b"; done
+if [ "$install" = "1" ]; then
+  [ -n "$prefix" ] || prefix="$(cat "$EC_FAKE_STATE/prefix" 2>/dev/null)"
+  [ -n "$prefix" ] || prefix="$EC_FAKE_STATE/defprefix"
+  mkdir -p "$prefix/bin" "$prefix/share"
+  for b in $EC_FAKE_BINS; do printf '#!/bin/sh\n:\n' > "$prefix/bin/$b"; chmod +x "$prefix/bin/$b"; done
+fi
 EOF
+
+# no-op stubs for system tools the heavier builds invoke
+for t in pip pip3 patchelf ldconfig strip; do printf '#!/bin/sh\n:\n' > "$BIN/$t"; chmod +x "$BIN/$t"; done
+
+# fake curl: synthesize the expected source tarball from the URL filename, so
+# `curl -fL <url>/foo-1.5.tar.bz2 | tar -xj` yields a foo-1.5/ tree to build.
+cat > "$BIN/curl" <<'EOF'
+#!/usr/bin/env bash
+url=""; out=""
+args=("$@")
+for ((i=0;i<${#args[@]};i++)); do case "${args[$i]}" in
+  http*) url="${args[$i]}";;
+  -o) out="${args[$((i+1))]}";;
+esac; done
+base="$(basename "$url")"
+dir="${base%.tar.bz2}"; dir="${dir%.tar.gz}"; dir="${dir%.tgz}"
+tmp="$(mktemp -d)"; mkdir -p "$tmp/$dir"; : > "$tmp/$dir/CMakeLists.txt"
+if [ -n "$out" ]; then tar -cjf "$out" -C "$tmp" "$dir"; else tar -cjf - -C "$tmp" "$dir"; fi
+rm -rf "$tmp"
+EOF
+chmod +x "$BIN/curl"
 
 cat > "$BIN/cmake" <<'EOF'
 #!/usr/bin/env bash
@@ -77,10 +113,14 @@ for ((i=0;i<${#args[@]};i++)); do case "${args[$i]}" in
   --install) mode="install"; prefix_dir="${args[$((i+1))]}";;
 esac; done
 if [ "$mode" = "configure" ]; then mkdir -p "$build"; echo "$prefix" > "$build/.prefix";
-  [ -n "$prefix" ] && echo "$prefix" > "$EC_FAKE_STATE/prefix"   # for a later `make install`
-elif [ "$mode" = "build" ]; then prefix="$(cat "$build/.prefix" 2>/dev/null)";
-  mkdir -p "$prefix/bin" "$prefix/share"
-  for b in $EC_FAKE_BINS; do printf '#!/bin/sh\necho fake %s\n' "$b" > "$prefix/bin/$b"; chmod +x "$prefix/bin/$b"; done
+  { [ -n "$prefix" ] && echo "$prefix" > "$EC_FAKE_STATE/prefix"; } || true  # for a later `make install`
+elif [ "$mode" = "build" ]; then
+  : > "$build/slang.so"   # plugin builds (no install prefix) just emit a .so
+  prefix="$(cat "$build/.prefix" 2>/dev/null)"
+  if [ -n "$prefix" ]; then
+    mkdir -p "$prefix/bin" "$prefix/share"
+    for b in $EC_FAKE_BINS; do printf '#!/bin/sh\n:\n' > "$prefix/bin/$b"; chmod +x "$prefix/bin/$b"; done
+  fi
 fi
 EOF
 
