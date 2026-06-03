@@ -24,6 +24,8 @@ set -euo pipefail
 TOOL_DIR="${1:?usage: local-build.sh <tool-dir> [build|clean|shell]}"
 CMD="${2:-build}"
 TOOL_DIR="$(cd "$TOOL_DIR" && pwd)"
+# This script lives in edapack-common/scripts; the repo root is its grandparent.
+EC_COMMON_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TOOL="$(basename "$TOOL_DIR")"
 IMAGE_NAME="${IMAGE_NAME:-manylinux_2_28_x86_64}"
 IMAGE="${EC_IMAGE:-ghcr.io/edapack/${IMAGE_NAME}}"
@@ -72,8 +74,11 @@ common_args=(
   -v "$VOLUME:/work"
   -v "$DIST:/dist"
   -e SRC_DIR=/src -e WORK_DIR=/work -e OUT_DIR=/dist
+  -e EC_COMMON=/ec-common
+  -e EC_IMAGE_NAME="$IMAGE_NAME"
   -e core_ref="${core_ref:-}"
   -e input_overrides="${input_overrides:-}"
+  -v "$EC_COMMON_DIR:/ec-common:ro"
   -w /work
 )
 
