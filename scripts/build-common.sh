@@ -174,18 +174,20 @@ ec_platform_json() {
     local out="$1" arch os libc image
     os="$(uname -s | tr '[:upper:]' '[:lower:]')"
     arch="$(uname -m)"
-    if [ -n "${EC_IMAGE_NAME:-}" ]; then
-        case "$EC_IMAGE_NAME" in
-            *2_28*) libc="glibc_2.28" ;;
-            *2_34*) libc="glibc_2.34" ;;
-            *2014*) libc="glibc_2.17" ;;
-            *)      libc="unknown" ;;
-        esac
-        image="quay.io/pypa/${EC_IMAGE_NAME}"
-    else
-        libc="$(ldd --version 2>/dev/null | head -1 | grep -oE '[0-9]+\.[0-9]+' | head -1 | sed 's/^/glibc_/' || echo unknown)"
-        image="local"
-    fi
+    case "${EC_IMAGE_NAME:-}" in
+        manylinux*2_28*) libc="glibc_2.28"; image="quay.io/pypa/${EC_IMAGE_NAME}" ;;
+        manylinux*2_34*) libc="glibc_2.34"; image="quay.io/pypa/${EC_IMAGE_NAME}" ;;
+        manylinux*2014*) libc="glibc_2.17"; image="quay.io/pypa/${EC_IMAGE_NAME}" ;;
+        *)
+            # native build (e.g. macOS) or unknown image
+            image="${EC_IMAGE_NAME:-native}"
+            if [ "$os" = "darwin" ]; then
+                libc=""
+            else
+                libc="$(ldd --version 2>/dev/null | head -1 | grep -oE '[0-9]+\.[0-9]+' | head -1 | sed 's/^/glibc_/' || echo unknown)"
+            fi
+            ;;
+    esac
     python3 - "$out" "$os" "$arch" "$libc" "$image" <<'PY'
 import json, sys
 out, os_, arch, libc, image = sys.argv[1:6]
