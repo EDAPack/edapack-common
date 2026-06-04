@@ -29,7 +29,10 @@ def strip_inline_comment(v: str) -> str:
 
     YAML only treats `#` as a comment when preceded by whitespace, so `a:b#c`
     and URLs are safe, but `value  # note` and `[a, b] # note` are trimmed.
+    A value that is *only* a comment (e.g. `key:   # note`) trims to empty.
     """
+    if v.lstrip().startswith("#"):
+        return ""
     in_s = in_d = False
     for i, ch in enumerate(v):
         if ch == "'" and not in_d:
@@ -104,7 +107,12 @@ def parse_simple_yaml(text: str) -> dict:
             v = strip_inline_comment(v.strip()).strip()
             if v == "":
                 j = i + 1
-                while j < len(lines) and not lines[j].strip():
+                # skip blank AND comment lines when deciding the block's type,
+                # so a comment between a key and its list items doesn't make a
+                # list look like a dict.
+                while j < len(lines) and (
+                    not lines[j].strip() or lines[j].lstrip().startswith("#")
+                ):
                     j += 1
                 if j < len(lines) and lines[j].lstrip().startswith("- "):
                     new: list = []

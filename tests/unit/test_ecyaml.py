@@ -44,3 +44,36 @@ dependencies:
 def test_flow_list_with_comment():
     d = y.parse_simple_yaml("binaries: [a, b, c]   # tools\n")
     assert d["binaries"] == ["a", "b", "c"]
+
+
+def test_comment_line_before_list_items():
+    # a comment line between a key and its list must not make the list a dict
+    text = """dependencies:
+  # the deps
+  - name: a
+    policy: branch:main
+  # another
+  - name: b
+    policy: tag:v1
+"""
+    d = y.parse_simple_yaml(text)
+    assert isinstance(d["dependencies"], list)
+    assert [x["name"] for x in d["dependencies"]] == ["a", "b"]
+
+
+def test_inline_and_line_comments_full_build_inputs():
+    text = """schema: edapack.build-inputs/1
+core:
+  name: nextpnr            # core
+  repo: https://github.com/YosysHQ/nextpnr
+  policy: latest-tag
+dependencies:               # the deps
+  # icestorm provides chipdb
+  - name: icestorm
+    repo: https://github.com/YosysHQ/icestorm
+    policy: branch:main
+"""
+    d = y.parse_simple_yaml(text)
+    assert d["core"]["name"] == "nextpnr"
+    assert isinstance(d["dependencies"], list)
+    assert d["dependencies"][0]["name"] == "icestorm"
