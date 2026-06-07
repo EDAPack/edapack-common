@@ -20,6 +20,7 @@ import argparse
 import json
 import sys
 from pathlib import Path
+from typing import Optional
 
 
 def _load(path: Path) -> dict:
@@ -92,7 +93,7 @@ def merge(args) -> int:
     return 0
 
 
-def _emit(manifest: dict, output: Path | None) -> None:
+def _emit(manifest: dict, output: Optional[Path]) -> None:
     text = json.dumps(manifest, indent=2) + "\n"
     if output:
         output.write_text(text)

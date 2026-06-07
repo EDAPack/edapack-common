@@ -33,7 +33,7 @@ import subprocess
 import sys
 import urllib.request
 from pathlib import Path
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _ecyaml import parse_simple_yaml  # noqa: E402
@@ -138,9 +138,13 @@ def resolve_policy(backend, repo: str, policy: str) -> Tuple[str, str]:
         return resolve_ref(backend, repo, tag)
     if policy == "latest-tag":
         refs = backend.ls_remote(repo)
+        # str.removesuffix is 3.9+; slice manually to stay 3.6-compatible.
+        def _strip_peel(t):
+            return t[:-3] if t.endswith("^{}") else t
+
         tags = sorted(
             (
-                r[len("refs/tags/"):].removesuffix("^{}")
+                _strip_peel(r[len("refs/tags/"):])
                 for r in refs
                 if r.startswith("refs/tags/")
             ),
@@ -152,14 +156,14 @@ def resolve_policy(backend, repo: str, policy: str) -> Tuple[str, str]:
     raise ValueError(f"unknown policy: {policy}")
 
 
-def _derive_version(ref: str, policy: str) -> str | None:
+def _derive_version(ref: str, policy: str) -> Optional[str]:
     """Best-effort human version string from the resolved ref."""
     if policy.startswith("branch:"):
         return None
     return _strip_v(ref)
 
 
-def resolve_one(backend, spec: dict, role: str, override_ref: str | None) -> dict:
+def resolve_one(backend, spec: dict, role: str, override_ref: Optional[str]) -> dict:
     repo = spec["repo"]
     if override_ref:
         ref, sha = resolve_ref(backend, repo, override_ref)
@@ -198,8 +202,8 @@ def compute_digest(inputs: List[dict], recipe_sha: str) -> str:
 def resolve_inputs(
     spec: dict,
     recipe_sha: str,
-    core_ref: str | None = None,
-    overrides: dict | None = None,
+    core_ref: Optional[str] = None,
+    overrides: Optional[dict] = None,
     backend=None,
 ) -> dict:
     backend = backend or GitBackend()
