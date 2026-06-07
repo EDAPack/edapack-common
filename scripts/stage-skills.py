@@ -17,26 +17,26 @@ Exit codes:
   1  manifest / validation / copy failure
 """
 
-from __future__ import annotations
-
 import argparse
 import json
 import shutil
 import sys
-from dataclasses import dataclass
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _ecyaml import parse_simple_yaml, parse_frontmatter  # noqa: E402
 
 
-@dataclass
+# NOTE: kept compatible with the manylinux2014 image's system Python 3.6 — no
+# `from __future__ import annotations` and no `dataclasses` (both 3.7+). Hence a
+# plain class rather than @dataclass.
 class SkillEntry:
-    name: str
-    path: Path
-    binaries: list
-    description: str
-    version: str
+    def __init__(self, name, path, binaries, description, version):
+        self.name = name
+        self.path = path
+        self.binaries = binaries
+        self.description = description
+        self.version = version
 
 
 def _validate(manifest_path: Path, source_root: Path, release_root: Path) -> list:

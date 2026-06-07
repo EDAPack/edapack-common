@@ -17,8 +17,9 @@ Scalars are coerced: ints, floats, true/false, null/~, quoted strings.
 Anything else stays a string.
 """
 
-from __future__ import annotations
-
+# NOTE: no `from __future__ import annotations` — must import on the
+# manylinux2014 image's system Python 3.6 (that feature is 3.7+). All
+# annotations below are bare builtins, so eager evaluation is fine.
 import re
 
 _FRONT_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n", re.DOTALL)
