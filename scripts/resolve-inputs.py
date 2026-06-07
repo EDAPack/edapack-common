@@ -49,11 +49,14 @@ class GitBackend:
 
     def ls_remote(self, repo: str) -> dict:
         """Return {ref: sha} for all refs (heads + tags) of `repo`."""
+        # capture_output= and text= are 3.7+; use the 3.6-compatible spellings
+        # (stdout=PIPE + universal_newlines=True) so this works in-container.
         out = subprocess.run(
             ["git", "ls-remote", repo],
             check=True,
-            capture_output=True,
-            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            universal_newlines=True,
         ).stdout
         refs: dict = {}
         for line in out.splitlines():

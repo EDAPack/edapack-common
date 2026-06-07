@@ -103,7 +103,9 @@ def _emit(manifest: dict, output: Optional[Path]) -> None:
 
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    sub = p.add_subparsers(dest="cmd", required=True)
+    # add_subparsers(required=...) is 3.7+; set the attribute for 3.6 compat.
+    sub = p.add_subparsers(dest="cmd")
+    sub.required = True
 
     a = sub.add_parser("assemble")
     a.add_argument("--candidate", required=True, type=Path)
