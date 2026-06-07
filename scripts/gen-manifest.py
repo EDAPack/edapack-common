@@ -14,8 +14,8 @@ Two modes:
 Exit codes: 0 success; 1 error.
 """
 
-from __future__ import annotations
-
+# NOTE: no `from __future__ import annotations` — must run under the
+# manylinux2014 / manylinux_2_28 system Python 3.6 (that feature is 3.7+).
 import argparse
 import json
 import sys

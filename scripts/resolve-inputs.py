@@ -21,8 +21,10 @@ the GitHub releases API.
 Exit codes: 0 success; 1 resolution/validation error.
 """
 
-from __future__ import annotations
-
+# NOTE: no `from __future__ import annotations` — must run under the
+# manylinux2014 / manylinux_2_28 system Python 3.6 (that feature is 3.7+).
+# Annotations below therefore use typing.Tuple/List rather than the PEP 585
+# builtin generics (tuple[...]/list[...]), which 3.6 cannot evaluate.
 import argparse
 import hashlib
 import json
@@ -31,6 +33,7 @@ import subprocess
 import sys
 import urllib.request
 from pathlib import Path
+from typing import List, Tuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _ecyaml import parse_simple_yaml  # noqa: E402
@@ -107,7 +110,7 @@ def _strip_v(s: str) -> str:
     return m.group(0) if m else s
 
 
-def resolve_ref(backend, repo: str, ref: str) -> tuple[str, str]:
+def resolve_ref(backend, repo: str, ref: str) -> Tuple[str, str]:
     """Resolve an explicit ref (tag, branch, or raw sha) to (ref, sha).
 
     Tries tag, then branch, then accepts a raw commit SHA as-is.
@@ -124,7 +127,7 @@ def resolve_ref(backend, repo: str, ref: str) -> tuple[str, str]:
     raise ValueError(f"{repo}: cannot resolve ref '{ref}'")
 
 
-def resolve_policy(backend, repo: str, policy: str) -> tuple[str, str]:
+def resolve_policy(backend, repo: str, policy: str) -> Tuple[str, str]:
     """Resolve a policy string to (ref, sha)."""
     if policy.startswith("branch:"):
         return resolve_ref(backend, repo, policy[len("branch:"):])
@@ -175,7 +178,7 @@ def resolve_one(backend, spec: dict, role: str, override_ref: str | None) -> dic
     }
 
 
-def compute_digest(inputs: list[dict], recipe_sha: str) -> str:
+def compute_digest(inputs: List[dict], recipe_sha: str) -> str:
     """Stable sha256 over tracked inputs' resolved_sha + recipe_sha."""
     payload = {
         "recipe_sha": recipe_sha,
@@ -212,7 +215,7 @@ def resolve_inputs(
 # --------------------------------------------------------------------------- #
 # CLI
 # --------------------------------------------------------------------------- #
-def _parse_override(items: list[str]) -> dict:
+def _parse_override(items: List[str]) -> dict:
     out: dict = {}
     for it in items:
         if "=" not in it:
