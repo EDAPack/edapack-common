@@ -356,8 +356,20 @@ jobs:
           export EC_COMMON="$PWD/packages/edapack-common"
           export CANDIDATE_JSON="$PWD/candidate.json"
           export EC_RECIPE_SHA="$(git rev-parse HEAD)"
-          # PATH for keg-only brew flex/bison
-          export PATH="$(brew --prefix bison 2>/dev/null)/bin:$(brew --prefix flex 2>/dev/null)/bin:$PATH"
+          # flex/bison are keg-only, and macOS ships a flex far too old for
+          # Verilator. PATH alone is not enough: configure probes $FLEX/$LEX and
+          # $BISON/$YACC, and silently falls back to the checked-in pregenerated
+          # lexer when it does not find a usable flex — which then fails to
+          # compile against the current V3LexerBase. Point every variable at the
+          # brew copies, and give the linker/preprocessor libfl explicitly.
+          brew_flex="$(brew --prefix flex 2>/dev/null)"
+          brew_bison="$(brew --prefix bison 2>/dev/null)"
+          export PATH="$brew_bison/bin:$brew_flex/bin:$PATH"
+          export FLEX="$brew_flex/bin/flex" LEX="$brew_flex/bin/flex"
+          export BISON="$brew_bison/bin/bison" YACC="$brew_bison/bin/bison"
+          export LDFLAGS="-L$brew_flex/lib${LDFLAGS:+ $LDFLAGS}"
+          export CPPFLAGS="-I$brew_flex/include${CPPFLAGS:+ $CPPFLAGS}"
+          "$FLEX" --version && "$BISON" --version | head -1
           bash scripts/build.sh
           ls -l dist/
 
