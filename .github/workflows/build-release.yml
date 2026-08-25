@@ -39,13 +39,27 @@ on:
         required: false
         type: string
         default: "{}"
+      track:
+        description: >
+          dev = top-of-trunk snapshot (core.policy), pre-release, never moves
+          `latest`. release = newest upstream release (core.release_policy),
+          full release, moves `latest`. Both tracks resolve the release
+          candidate and branch opposite ways on it, so at most one builds per
+          run — see the Developer Guide (release tracks).
+        required: false
+        type: string
+        default: dev
       force:
         description: "Build even if inputs unchanged"
         required: false
         type: boolean
         default: false
       prerelease:
-        description: "Mark the release as prerelease"
+        description: >
+          Mark the release as prerelease. Applies to the dev track only; the
+          release track is always a full release (a workflow_call input cannot
+          tell "unset" from "default", so this is derived rather than honored
+          there).
         required: false
         type: boolean
         default: true
@@ -66,6 +80,7 @@ jobs:
       tag: ${{ steps.version.outputs.tag }}
       changed_summary: ${{ steps.gate.outputs.changed_summary }}
       targets: ${{ steps.targets.outputs.targets }}
+      new_release: ${{ steps.newrel.outputs.new_release }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -111,48 +126,153 @@ jobs:
           python3 "$EC/scripts/resolve-inputs.py" \
             --build-inputs build-inputs.yaml \
             --recipe-sha "$(git rev-parse HEAD)" \
+            --track "${{ inputs.track }}" \
             --overrides-json '${{ inputs.input_overrides }}' \
             "${overrides_args[@]}" \
             --output candidate.json
           cat candidate.json
 
-      - name: Fetch last release manifest
-        id: prev
+      # Both tracks ask the same question — "has upstream released something we
+      # have not built?" — and branch opposite ways on the answer, so a week
+      # that produces a release does not also produce a dev snapshot. The test
+      # is a pure function of upstream tags + our published releases, needing no
+      # job-to-job plumbing and no state carried between runs.
+      - name: Detect new upstream release
+        id: newrel
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          if gh release view --repo "${{ github.repository }}" --json tagName -q .tagName >/dev/null 2>&1; then
-            gh release download --repo "${{ github.repository }}" --pattern manifest.json --dir prev || true
+          rel_tag="$(python3 -c 'import json; c=json.load(open("candidate.json"))["release_candidate"]; print(c["tag"] if c else "")')"
+          if [ -z "$rel_tag" ]; then
+            echo "no release_policy declared -> dev track only"
+            echo "new_release=false" >> "$GITHUB_OUTPUT"
+          elif gh release view "$rel_tag" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            echo "upstream $rel_tag already released by us"
+            echo "new_release=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "upstream $rel_tag is new"
+            echo "new_release=true" >> "$GITHUB_OUTPUT"
           fi
-          [ -f prev/manifest.json ] && echo "previous=prev/manifest.json" >> "$GITHUB_OUTPUT" || echo "previous=none" >> "$GITHUB_OUTPUT"
+          echo "release_tag=${rel_tag}" >> "$GITHUB_OUTPUT"
+
+      # P3: `gh release download` with no tag pulls GitHub's *latest* release,
+      # which excludes pre-releases — the dev track would diff against a
+      # hand-promoted release rather than last week's build. Walk releases
+      # newest-first instead and take the first manifest matching this track.
+      - name: Fetch last release manifest for this track
+        id: prev
+        if: inputs.track == 'dev'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TRACK: ${{ inputs.track }}
+        run: |
+          EC=packages/edapack-common
+          previous=none
+          tags=$(gh release list --repo "${{ github.repository }}" --limit 10 \
+                   --json tagName -q '.[].tagName' 2>/dev/null || true)
+          for tag in $tags; do
+            rm -rf prev && mkdir -p prev
+            gh release download "$tag" --repo "${{ github.repository }}" \
+              --pattern manifest.json --dir prev >/dev/null 2>&1 || continue
+            [ -f prev/manifest.json ] || continue
+            found=$(python3 "$EC/scripts/gen-manifest.py" track \
+                      --manifest prev/manifest.json --tag "$tag")
+            if [ "$found" = "$TRACK" ]; then
+              echo "previous manifest: $tag"
+              previous=prev/manifest.json
+              break
+            fi
+          done
+          [ "$previous" = none ] && echo "no prior $TRACK release found"
+          echo "previous=${previous}" >> "$GITHUB_OUTPUT"
 
       - name: Change gate
         id: gate
+        env:
+          NEW_RELEASE: ${{ steps.newrel.outputs.new_release }}
         run: |
           EC=packages/edapack-common
-          pinned=""; [ -n "${{ inputs.core_ref }}" ] || [ "${{ inputs.input_overrides }}" != "{}" ] && pinned="--pinned"
-          force="";  [ "${{ inputs.force }}" = "true" ] && force="--force"
-          python3 "$EC/scripts/manifest-diff.py" \
-            --candidate candidate.json \
-            --previous "${{ steps.prev.outputs.previous }}" \
-            --trigger "${{ github.event_name == 'schedule' && 'schedule' || (github.event_name == 'workflow_dispatch' && 'workflow_dispatch' || 'push') }}" \
-            $force $pinned \
-            --github-output "$GITHUB_OUTPUT"
+          if [ "${{ inputs.track }}" = release ]; then
+            # The upstream tag *is* the identity on this track: build exactly
+            # when upstream has a release we have not published. The inputs
+            # digest is still recorded in the manifest, just not used as a gate.
+            if [ "$NEW_RELEASE" = true ] || [ "${{ inputs.force }}" = "true" ]; then
+              echo "build_needed=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "build_needed=false" >> "$GITHUB_OUTPUT"
+            fi
+            {
+              echo "changed_summary<<EOF"
+              echo "Upstream release ${{ steps.newrel.outputs.release_tag }}."
+              echo "EOF"
+            } >> "$GITHUB_OUTPUT"
+          elif [ "$NEW_RELEASE" = true ] && [ "${{ inputs.force }}" != "true" ]; then
+            # A new upstream release exists: the release track is building it,
+            # so skip the redundant snapshot of the same code.
+            echo "standing down for release ${{ steps.newrel.outputs.release_tag }}"
+            echo "build_needed=false" >> "$GITHUB_OUTPUT"
+            {
+              echo "changed_summary<<EOF"
+              echo "Superseded by release ${{ steps.newrel.outputs.release_tag }}."
+              echo "EOF"
+            } >> "$GITHUB_OUTPUT"
+          else
+            pinned=""; [ -n "${{ inputs.core_ref }}" ] || [ "${{ inputs.input_overrides }}" != "{}" ] && pinned="--pinned"
+            force="";  [ "${{ inputs.force }}" = "true" ] && force="--force"
+            python3 "$EC/scripts/manifest-diff.py" \
+              --candidate candidate.json \
+              --previous "${{ steps.prev.outputs.previous }}" \
+              --trigger "${{ github.event_name == 'schedule' && 'schedule' || (github.event_name == 'workflow_dispatch' && 'workflow_dispatch' || 'push') }}" \
+              $force $pinned \
+              --github-output "$GITHUB_OUTPUT"
+          fi
 
       - name: Compute version
         id: version
         run: |
           core_ver="$(python3 -c 'import json; d=json.load(open("candidate.json")); print(next(i["version"] or "0" for i in d["inputs"] if i["role"]=="core"))')"
-          version="${core_ver}.$(date -u +%Y%m%d)"
+          if [ "${{ inputs.track }}" = release ]; then
+            # Simple, matching upstream: 5.050 / v5.050, no build-id suffix.
+            version="${core_ver}"
+          else
+            # run_id, not a date: two builds can land on the same day, and every
+            # published dev tag to date uses the run id.
+            version="${core_ver}.${{ github.run_id }}"
+          fi
           echo "version=${version}" >> "$GITHUB_OUTPUT"
           echo "tag=v${version}" >> "$GITHUB_OUTPUT"
+
+      # Verilator-style upstreams publish tags but no GitHub Releases, so the
+      # release body comes from their changelog at the built SHA. Soft-fails:
+      # a changelog reformat must not block a release (exit 2 -> default notes).
+      - name: Extract upstream release notes
+        id: notes
+        if: inputs.track == 'release' && steps.gate.outputs.build_needed == 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          EC=packages/edapack-common
+          # The changelog path rides along in candidate.json (core.release_notes),
+          # so there is no second YAML parse here. Exit 2 = no notes available.
+          if python3 "$EC/scripts/release-notes.py" \
+               --candidate candidate.json \
+               --package "${{ inputs.package }}" \
+               --version "${{ steps.version.outputs.version }}" \
+               --output release-notes.md; then
+            echo "have_notes=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "release notes unavailable; publishing with default notes"
+          fi
 
       - name: Upload candidate
         if: steps.gate.outputs.build_needed == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: candidate
-          path: candidate.json
+          path: |
+            candidate.json
+            release-notes.md
+          if-no-files-found: warn
 
   # --------------------------------------------------------------------- #
   # build: one job per target. Linux targets (kind=docker) `docker run` the
@@ -196,6 +316,7 @@ jobs:
           EC_TAG: ${{ needs.resolve.outputs.tag }}
           EC_TRIGGER: ${{ github.event_name == 'schedule' && 'schedule' || (github.event_name == 'workflow_dispatch' && 'workflow_dispatch' || 'push') }}
           EC_IMAGE_NAME: ${{ matrix.target.name }}
+          EC_TRACK: ${{ inputs.track }}
         run: |
           mkdir -p dist
           docker run --rm \
@@ -204,7 +325,7 @@ jobs:
             -e EC_COMMON=/src/packages/edapack-common \
             -e EC_INSTALL_DEPS=1 \
             -e CANDIDATE_JSON=/src/candidate.json \
-            -e EC_PACKAGE -e EC_VERSION -e EC_TAG -e EC_TRIGGER -e EC_IMAGE_NAME \
+            -e EC_PACKAGE -e EC_VERSION -e EC_TAG -e EC_TRIGGER -e EC_IMAGE_NAME -e EC_TRACK \
             -e EC_RECIPE_SHA="$(git rev-parse HEAD)" \
             -e core_ref="${{ inputs.core_ref }}" \
             -e input_overrides='${{ inputs.input_overrides }}' \
@@ -226,6 +347,7 @@ jobs:
           EC_TAG: ${{ needs.resolve.outputs.tag }}
           EC_TRIGGER: ${{ github.event_name == 'schedule' && 'schedule' || (github.event_name == 'workflow_dispatch' && 'workflow_dispatch' || 'push') }}
           EC_IMAGE_NAME: ${{ matrix.target.name }}
+          EC_TRACK: ${{ inputs.track }}
           core_ref: ${{ inputs.core_ref }}
           input_overrides: ${{ inputs.input_overrides }}
         run: |
@@ -278,12 +400,24 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           notes="$(mktemp)"
-          {
-            echo "Automated build of ${{ inputs.package }} ${{ needs.resolve.outputs.version }}."
-            echo; echo "### Input changes since last release"; echo
-            echo "${{ needs.resolve.outputs.changed_summary }}"
-          } > "$notes"
-          flags=""; [ "${{ inputs.prerelease }}" = "true" ] && flags="--prerelease"
+          upstream_notes=artifacts/candidate/release-notes.md
+          if [ "${{ inputs.track }}" = release ] && [ -f "$upstream_notes" ]; then
+            cp "$upstream_notes" "$notes"
+          else
+            {
+              echo "Automated build of ${{ inputs.package }} ${{ needs.resolve.outputs.version }}."
+              echo; echo "### Input changes since last release"; echo
+              echo "${{ needs.resolve.outputs.changed_summary }}"
+            } > "$notes"
+          fi
+          # The release track publishes a full release and takes `latest`; the
+          # dev track is always a pre-release and must never move `latest`.
+          if [ "${{ inputs.track }}" = release ]; then
+            flags="--latest"
+          else
+            flags="--latest=false"
+            [ "${{ inputs.prerelease }}" = "true" ] && flags="--prerelease --latest=false"
+          fi
           gh release create "${{ needs.resolve.outputs.tag }}" \
             --repo "${{ github.repository }}" \
             --title "${{ inputs.package }} ${{ needs.resolve.outputs.version }}" \

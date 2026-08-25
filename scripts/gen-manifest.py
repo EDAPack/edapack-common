@@ -11,6 +11,9 @@ Two modes:
             top-level manifest whose `platforms[]` lists every built platform.
             Used by the publish step.
 
+  track     Print which track produced a manifest ('dev' / 'release'). Used to
+            find the previous release *on the same track* when change-gating.
+
 Exit codes: 0 success; 1 error.
 """
 
@@ -18,6 +21,7 @@ Exit codes: 0 success; 1 error.
 # manylinux2014 / manylinux_2_28 system Python 3.6 (that feature is 3.7+).
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 from typing import Optional
@@ -25,6 +29,28 @@ from typing import Optional
 
 def _load(path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+# A release-track tag is the bare upstream version (v5.050); a dev-track tag
+# carries a build-id third component (v5.051.32639969514).
+_RELEASE_TAG_RE = re.compile(r"^v?\d+(?:\.\d+)?$")
+
+
+def track_of(manifest: Optional[dict], tag: Optional[str] = None) -> Optional[str]:
+    """Determine which track produced a release: 'dev', 'release', or None.
+
+    Prefers the recorded `release.track`. Manifests written before that field
+    existed fall back to the tag's shape, so the track-aware previous-manifest
+    lookup still works against the existing published history.
+    """
+    if manifest:
+        recorded = (manifest.get("release") or {}).get("track")
+        if recorded in ("dev", "release"):
+            return recorded
+        tag = tag or (manifest.get("release") or {}).get("tag")
+    if not tag:
+        return None
+    return "release" if _RELEASE_TAG_RE.match(tag) else "dev"
 
 
 def _skills_from_index(index_path: Path) -> list:
@@ -51,6 +77,7 @@ def assemble(args) -> int:
         "release": {
             "version": args.version,
             "tag": args.tag,
+            "track": getattr(args, "track", None) or "dev",
             "built_at": args.built_at,
             "trigger": args.trigger,
             "recipe_sha": args.recipe_sha,
@@ -93,6 +120,17 @@ def merge(args) -> int:
     return 0
 
 
+def track(args) -> int:
+    """Print the track that produced a manifest ('dev' / 'release' / 'unknown').
+
+    Used by the previous-manifest lookup to walk releases newest-first and stop
+    at the first one belonging to the track being built.
+    """
+    manifest = _load(args.manifest) if args.manifest and args.manifest.is_file() else None
+    print(track_of(manifest, args.tag) or "unknown")
+    return 0
+
+
 def _emit(manifest: dict, output: Optional[Path]) -> None:
     text = json.dumps(manifest, indent=2) + "\n"
     if output:
@@ -112,6 +150,7 @@ def main(argv=None) -> int:
     a.add_argument("--package", required=True)
     a.add_argument("--version", required=True)
     a.add_argument("--tag", required=True)
+    a.add_argument("--track", default="dev", choices=["dev", "release"])
     a.add_argument("--built-at", required=True)
     a.add_argument("--trigger", required=True, choices=["schedule", "workflow_dispatch", "push"])
     a.add_argument("--recipe-sha", required=True)
@@ -124,6 +163,11 @@ def main(argv=None) -> int:
     m.add_argument("--manifest", required=True, action="append", type=Path)
     m.add_argument("--output", type=Path, default=None)
     m.set_defaults(func=merge)
+
+    t = sub.add_parser("track")
+    t.add_argument("--manifest", type=Path, default=None)
+    t.add_argument("--tag", default=None, help="Fallback when the manifest omits release.track.")
+    t.set_defaults(func=track)
 
     args = p.parse_args(argv)
     return args.func(args)

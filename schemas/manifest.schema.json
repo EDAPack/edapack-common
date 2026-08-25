@@ -16,6 +16,11 @@
       "properties": {
         "version": { "type": "string" },
         "tag": { "type": "string" },
+        "track": {
+          "enum": ["dev", "release"],
+          "default": "dev",
+          "description": "Which track produced this release: 'dev' (top-of-trunk snapshot, pre-release) or 'release' (built from an upstream release tag, moves latest). Optional: manifests published before this field existed are classified by tag shape."
+        },
         "built_at": { "type": "string", "format": "date-time" },
         "trigger": { "enum": ["schedule", "workflow_dispatch", "push"] },
         "recipe_sha": { "type": "string" }

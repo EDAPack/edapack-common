@@ -32,8 +32,22 @@
         },
         "policy": {
           "type": "string",
-          "pattern": "^(branch:.+|tag:.+|latest-release|latest-tag)$",
-          "description": "Resolution policy: branch:<b> | tag:<t> | latest-release | latest-tag."
+          "pattern": "^(branch:.+|tag:.+|latest-release|latest-tag(:.+)?)$",
+          "description": "Resolution policy: branch:<b> | tag:<t> | latest-release | latest-tag[:<tag-filter-regex>]."
+        },
+        "release_policy": {
+          "type": "string",
+          "pattern": "^(tag:.+|latest-release|latest-tag(:.+)?)$",
+          "description": "Core only. How the release track finds the newest upstream release. Absent means the package has no release track. Use latest-tag[:<regex>] for upstreams that publish tags but no GitHub Releases; the regex filters candidate tags before version-sorting, e.g. ^v\\d+\\.\\d+$ to ignore rc tags."
+        },
+        "version_probe": {
+          "type": "string",
+          "pattern": "^[^:]+:.+$",
+          "description": "Core only. '<path>:<key>' naming a file and macro/assignment to read the in-development version from when the policy is a branch (which yields no version from the ref alone), e.g. configure.ac:AC_INIT."
+        },
+        "release_notes": {
+          "type": "string",
+          "description": "Core only. Path to the upstream changelog in the core repo, e.g. Changes. Its section for the built version becomes the release body on the release track."
         },
         "track": {
           "type": "boolean",

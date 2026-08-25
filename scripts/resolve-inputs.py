@@ -6,9 +6,17 @@ command-line overrides, resolves every input's `policy` (or override) to a
 concrete commit SHA without cloning, and emits a candidate manifest fragment:
 
     {
+      "track": "dev" | "release",
+      "release_candidate": {ref, resolved_sha, version, tag} | null,
+      "release_notes": "<upstream changelog path>" | null,
       "inputs": [ {name, role, repo, ref, resolved_sha, version, tracked}, ... ],
       "inputs_digest": "sha256:<hex>"
     }
+
+`release_candidate` is the newest upstream release per `core.release_policy`,
+resolved on *both* tracks so each can decide independently whether a new
+upstream release exists (the release track builds it; the dev track stands down
+for it). It is null when the package declares no release track.
 
 The digest is a stable hash over every *tracked* input's resolved_sha plus the
 recipe SHA (this tool-bin repo's own commit), so a change to any tracked input
@@ -75,6 +83,19 @@ class GitBackend:
             data = json.load(resp)
         return data["tag_name"]
 
+    def read_file(self, repo: str, ref: str, path: str) -> str:
+        """Return the text of `path` in `repo` at `ref`, without cloning."""
+        import base64
+
+        slug = _github_slug(repo)
+        url = f"https://api.github.com/repos/{slug}/contents/{path}?ref={ref}"
+        req = urllib.request.Request(url, headers=_gh_headers())
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            data = json.load(resp)
+        if data.get("encoding") != "base64":
+            raise ValueError(f"{repo}:{path}@{ref}: unexpected encoding")
+        return base64.b64decode(data["content"]).decode("utf-8", "replace")
+
 
 def _github_slug(repo: str) -> str:
     m = re.search(r"github\.com[:/]+([^/]+/[^/]+?)(?:\.git)?/?$", repo)
@@ -131,7 +152,12 @@ def resolve_ref(backend, repo: str, ref: str) -> Tuple[str, str]:
 
 
 def resolve_policy(backend, repo: str, policy: str) -> Tuple[str, str]:
-    """Resolve a policy string to (ref, sha)."""
+    """Resolve a policy string to (ref, sha).
+
+    `latest-tag` accepts an optional `:<regex>` suffix that filters candidate
+    tags *before* version-sorting, e.g. `latest-tag:^v\\d+\\.\\d+$` to ignore
+    pre-release tags like `v5.052-rc1`. Bare `latest-tag` considers every tag.
+    """
     if policy.startswith("branch:"):
         return resolve_ref(backend, repo, policy[len("branch:"):])
     if policy.startswith("tag:"):
@@ -139,24 +165,68 @@ def resolve_policy(backend, repo: str, policy: str) -> Tuple[str, str]:
     if policy == "latest-release":
         tag = backend.latest_release(repo)
         return resolve_ref(backend, repo, tag)
-    if policy == "latest-tag":
+    if policy == "latest-tag" or policy.startswith("latest-tag:"):
+        pattern = policy[len("latest-tag:"):] if ":" in policy else None
         refs = backend.ls_remote(repo)
         # str.removesuffix is 3.9+; slice manually to stay 3.6-compatible.
         def _strip_peel(t):
             return t[:-3] if t.endswith("^{}") else t
 
-        tags = sorted(
-            (
-                _strip_peel(r[len("refs/tags/"):])
-                for r in refs
-                if r.startswith("refs/tags/")
-            ),
-            key=_version_sort_key,
+        names = set(
+            _strip_peel(r[len("refs/tags/"):])
+            for r in refs
+            if r.startswith("refs/tags/")
         )
+        if pattern:
+            try:
+                rx = re.compile(pattern)
+            except re.error as exc:
+                raise ValueError(f"{repo}: bad latest-tag regex {pattern!r}: {exc}")
+            names = set(t for t in names if rx.search(t))
+        tags = sorted(names, key=_version_sort_key)
         if not tags:
-            raise ValueError(f"{repo}: no tags for latest-tag policy")
+            raise ValueError(
+                f"{repo}: no tags match policy '{policy}'"
+                if pattern
+                else f"{repo}: no tags for latest-tag policy"
+            )
         return resolve_ref(backend, repo, tags[-1])
     raise ValueError(f"unknown policy: {policy}")
+
+
+_PROBE_VERSION_RE = re.compile(r"\d+(?:\.\d+)+")
+
+
+def probe_version(text: str, key: str) -> Optional[str]:
+    """Extract an in-development version from a config file's text.
+
+    `key` names the assignment/macro to look at (e.g. `AC_INIT`); the first
+    dotted-numeric token on the first line mentioning it wins:
+
+        AC_INIT([Verilator],[5.051 devel],...)  ->  5.051
+
+    Returns None when the key is absent or carries no version-shaped token, so
+    a probe failure degrades rather than aborting the resolve.
+    """
+    for line in text.splitlines():
+        if key in line:
+            m = _PROBE_VERSION_RE.search(line)
+            if m:
+                return m.group(0)
+    return None
+
+
+def resolve_version_probe(backend, repo: str, ref: str, probe: str) -> Optional[str]:
+    """Run a `<path>:<key>` version probe against `repo` at `ref`."""
+    if ":" not in probe:
+        raise ValueError(f"version_probe must be '<path>:<key>', got: {probe}")
+    path, key = probe.rsplit(":", 1)
+    try:
+        text = backend.read_file(repo, ref, path)
+    except Exception as exc:  # network/404/decoding — non-fatal
+        print(f"resolve-inputs: version_probe {probe} failed: {exc}", file=sys.stderr)
+        return None
+    return probe_version(text, key.strip())
 
 
 def _derive_version(ref: str, policy: str) -> Optional[str]:
@@ -174,6 +244,14 @@ def resolve_one(backend, spec: dict, role: str, override_ref: Optional[str]) -> 
     else:
         ref, sha = resolve_policy(backend, repo, spec["policy"])
         version = _derive_version(ref, spec["policy"])
+    # A branch policy yields no version from the ref alone; read it out of the
+    # checked-out tree instead (e.g. configure.ac's AC_INIT) so a top-of-trunk
+    # build is still versioned 5.051.<build-id> rather than 0.<build-id>.
+    # Probe at the resolved SHA, not the branch name: the branch can move
+    # between ls-remote and this read, and the version must describe the commit
+    # we actually record and build.
+    if version is None and spec.get("version_probe"):
+        version = resolve_version_probe(backend, repo, sha, spec["version_probe"])
     return {
         "name": spec["name"],
         "role": role,
@@ -183,6 +261,21 @@ def resolve_one(backend, spec: dict, role: str, override_ref: Optional[str]) -> 
         "version": version,
         "tracked": bool(spec.get("track", True)),
     }
+
+
+def resolve_release_candidate(backend, core_spec: dict) -> Optional[dict]:
+    """Resolve the core's `release_policy` to the newest upstream release.
+
+    Returned by *both* tracks so each can decide independently whether a new
+    upstream release exists: the release track builds it, the dev track stands
+    down for it. None when the package declares no release track.
+    """
+    policy = core_spec.get("release_policy")
+    if not policy:
+        return None
+    ref, sha = resolve_policy(backend, core_spec["repo"], policy)
+    version = _strip_v(ref)
+    return {"ref": ref, "resolved_sha": sha, "version": version, "tag": "v" + version}
 
 
 def compute_digest(inputs: List[dict], recipe_sha: str) -> str:
@@ -208,15 +301,44 @@ def resolve_inputs(
     core_ref: Optional[str] = None,
     overrides: Optional[dict] = None,
     backend=None,
+    track: str = "dev",
 ) -> dict:
+    """Resolve every input for `track` ('dev' or 'release').
+
+    The two tracks differ only in how the *core* input is resolved: `dev` uses
+    `core.policy` (top-of-trunk), `release` uses `core.release_policy` (the
+    newest upstream release tag). Dependencies resolve identically on both, so a
+    release build pairs the pinned core with current deps and the manifest
+    records exactly what was used.
+    """
+    if track not in ("dev", "release"):
+        raise ValueError(f"unknown track: {track}")
     backend = backend or GitBackend()
     overrides = overrides or {}
-    inputs = [resolve_one(backend, spec["core"], "core", core_ref)]
+    core_spec = spec["core"]
+    release_candidate = resolve_release_candidate(backend, core_spec)
+
+    if track == "release":
+        if release_candidate is None:
+            raise ValueError(
+                "track=release requires core.release_policy in build-inputs.yaml"
+            )
+        # An explicit core_ref still wins, so a specific tag can be rebuilt.
+        core_ref = core_ref or release_candidate["ref"]
+
+    inputs = [resolve_one(backend, core_spec, "core", core_ref)]
     for dep in spec.get("dependencies", []) or []:
         inputs.append(
             resolve_one(backend, dep, "dependency", overrides.get(dep["name"]))
         )
-    return {"inputs": inputs, "inputs_digest": compute_digest(inputs, recipe_sha)}
+    return {
+        "track": track,
+        "release_candidate": release_candidate,
+        # carried through so the publish step needs no second YAML parse
+        "release_notes": core_spec.get("release_notes"),
+        "inputs": inputs,
+        "inputs_digest": compute_digest(inputs, recipe_sha),
+    }
 
 
 # --------------------------------------------------------------------------- #
@@ -249,6 +371,12 @@ def main(argv=None) -> int:
         default=None,
         help="JSON object of {name: ref} dependency overrides.",
     )
+    p.add_argument(
+        "--track",
+        default="dev",
+        choices=["dev", "release"],
+        help="dev = core.policy (top-of-trunk); release = core.release_policy.",
+    )
     p.add_argument("--output", type=Path, default=None, help="Write JSON here (else stdout).")
     args = p.parse_args(argv)
 
@@ -269,6 +397,7 @@ def main(argv=None) -> int:
             recipe_sha=args.recipe_sha,
             core_ref=args.core_ref,
             overrides=overrides,
+            track=args.track,
         )
     except (ValueError, subprocess.CalledProcessError) as exc:
         print(f"resolve-inputs: {exc}", file=sys.stderr)

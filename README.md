@@ -13,10 +13,11 @@ See **[design](../BUILD_CENTRALIZATION_DESIGN.md)** and
 
 | Path | Purpose |
 |---|---|
-| `.github/workflows/build-release.yml` | Reusable workflow: resolve → change-gate → build matrix → publish, in stock `quay.io/pypa/manylinux*` images. Tool repos call this from a thin `ci.yml`. |
-| `scripts/resolve-inputs.py` | Resolve `build-inputs.yaml` (+ overrides) to commit SHAs and an `inputs_digest`. |
-| `scripts/gen-manifest.py` | Assemble per-tarball `manifest.json`; merge into a top-level release manifest. |
+| `.github/workflows/build-release.yml` | Reusable workflow: resolve → change-gate → build matrix → publish, in stock `quay.io/pypa/manylinux*` images. Tool repos call this from a thin `ci.yml`, once per track (see below). |
+| `scripts/resolve-inputs.py` | Resolve `build-inputs.yaml` (+ overrides) to commit SHAs and an `inputs_digest`, per track. |
+| `scripts/gen-manifest.py` | Assemble per-tarball `manifest.json`; merge into a top-level release manifest; report a manifest's track. |
 | `scripts/manifest-diff.py` | The change-gate: decide `build_needed` by diffing input digests. |
+| `scripts/release-notes.py` | Slice the upstream changelog section for the version being released (release track body). |
 | `scripts/stage-skills.py` | Validate + stage Agent Skills into a release (canonical copy). |
 | `scripts/build-common.sh` | Shell library sourced by each tool's `build.sh` (`ec_*` helpers). |
 | `scripts/local-build.sh` | Rootless local manylinux build wrapper (+ `clean`). |
@@ -31,6 +32,30 @@ See **[design](../BUILD_CENTRALIZATION_DESIGN.md)** and
 - **`manifest.json`** (in every release) records exactly what went into the
   build, with an `inputs_digest` used to gate weekly releases. Schema:
   `schemas/manifest.schema.json`.
+
+## Release tracks
+
+`build-release.yml` takes a `track` input. A tool repo calls it once per track.
+
+| | `dev` (default) | `release` |
+|---|---|---|
+| Core ref | `core.policy`, e.g. `branch:master` | `core.release_policy`, e.g. `latest-tag:^v\d+\.\d+$` |
+| Version | `<core version>.<run id>` | `<upstream tag version>` |
+| Pre-release | yes | no |
+| Moves `latest` | no | yes |
+| Body | input changes since last release | upstream changelog section (`core.release_notes`) |
+| Gate | `inputs_digest` vs. the last *dev* release | upstream tag we have not published |
+
+A package with no `core.release_policy` has no release track and behaves as
+before. Where a branch policy yields no version from the ref alone, set
+`core.version_probe` (e.g. `configure.ac:AC_INIT`) to read it out of the tree at
+the resolved SHA.
+
+Both tracks resolve the newest upstream release and branch opposite ways on
+whether it is already published, so at most one of them builds in a given run:
+a week that ships a release does not also ship a redundant snapshot. Neither
+job depends on the other — the test is a pure function of upstream tags and
+published releases.
 
 ## Local build
 

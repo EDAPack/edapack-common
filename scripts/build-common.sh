@@ -89,7 +89,8 @@ PY
 # ec_prepare_candidate — ensure CANDIDATE_JSON + release metadata are set,
 # whether invoked from CI (everything provided) or locally (resolve here).
 # Sets/export: CANDIDATE_JSON, EC_RECIPE_SHA, EC_VERSION, EC_TAG.
-# Honors the `core_ref` and `input_overrides` env vars for local pinned builds.
+# Honors the `core_ref` and `input_overrides` env vars for local pinned builds,
+# and EC_TRACK (dev|release, default dev) to pick the core resolution policy.
 ec_prepare_candidate() {
     : "${EC_RECIPE_SHA:=$(git -C "$SRC_DIR" rev-parse HEAD 2>/dev/null || echo local)}"
     if [ -z "${CANDIDATE_JSON:-}" ] || [ ! -f "${CANDIDATE_JSON:-}" ]; then
@@ -98,20 +99,27 @@ ec_prepare_candidate() {
         [ -n "${core_ref:-}" ] && extra+=(--core-ref "$core_ref")
         [ -n "${input_overrides:-}" ] && [ "${input_overrides}" != "{}" ] \
             && extra+=(--overrides-json "$input_overrides")
-        ec_log "resolving inputs locally -> $CANDIDATE_JSON"
+        ec_log "resolving inputs locally -> $CANDIDATE_JSON (track=${EC_TRACK:-dev})"
         python3 "$EC_COMMON/scripts/resolve-inputs.py" \
             --build-inputs "$SRC_DIR/build-inputs.yaml" \
             --recipe-sha "$EC_RECIPE_SHA" \
+            --track "${EC_TRACK:-dev}" \
             "${extra[@]}" \
             --output "$CANDIDATE_JSON"
     fi
     export CANDIDATE_JSON EC_RECIPE_SHA
     if [ -z "${EC_VERSION:-}" ]; then
-        local core_ver date
+        local core_ver
         core_ver="$(ec_core_get version)"
         [ -n "$core_ver" ] || core_ver="0"
-        date="$(date -u +%Y%m%d)"
-        EC_VERSION="${core_ver}.${date}"
+        if [ "${EC_TRACK:-dev}" = release ]; then
+            # release track: the upstream tag version *is* the version
+            EC_VERSION="${core_ver}"
+        else
+            # CI sets EC_VERSION from the run id; a local dev build has no run
+            # id, so fall back to the date to keep the tag shape recognizable.
+            EC_VERSION="${core_ver}.$(date -u +%Y%m%d)"
+        fi
         EC_TAG="v${EC_VERSION}"
     fi
     export EC_VERSION EC_TAG
@@ -148,8 +156,8 @@ ec_copy_envrc() {
 
 # ec_emit_manifest CANDIDATE_JSON RELEASE_ROOT PLATFORM_JSON
 # Assemble manifest.json into the release root using release metadata from the
-# environment (EC_PACKAGE, EC_VERSION, EC_TAG, EC_BUILT_AT, EC_TRIGGER,
-# EC_RECIPE_SHA). PLATFORM_JSON may be "" to omit the platform block.
+# environment (EC_PACKAGE, EC_VERSION, EC_TAG, EC_TRACK, EC_BUILT_AT,
+# EC_TRIGGER, EC_RECIPE_SHA). PLATFORM_JSON may be "" to omit the platform block.
 ec_emit_manifest() {
     local candidate="$1" release_root="$2" platform="$3"
     : "${EC_BUILT_AT:=$(date -u +%Y-%m-%dT%H:%M:%SZ)}"
@@ -158,6 +166,7 @@ ec_emit_manifest() {
         --package "${EC_PACKAGE:?EC_PACKAGE unset}"
         --version "${EC_VERSION:?EC_VERSION unset}"
         --tag "${EC_TAG:?EC_TAG unset}"
+        --track "${EC_TRACK:-dev}"
         --built-at "$EC_BUILT_AT"
         --trigger "${EC_TRIGGER:-push}"
         --recipe-sha "${EC_RECIPE_SHA:-unknown}"
