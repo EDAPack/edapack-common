@@ -32,6 +32,38 @@ See **[design](../BUILD_CENTRALIZATION_DESIGN.md)** and
 - **`manifest.json`** (in every release) records exactly what went into the
   build, with an `inputs_digest` used to gate weekly releases. Schema:
   `schemas/manifest.schema.json`.
+- **`scripts/release-ivpm.yaml`** (optional, in each tool repo) is staged into
+  the release as `ivpm.yaml`. See below.
+
+## Shipping an ivpm manifest with a release
+
+`ivpm` reads `packages/<name>/ivpm.yaml` for every installed package, so an
+`ivpm.yaml` *inside* the tarball is what lets an installed release prepend its
+`bin/` to `PATH` and pull the runtime packages it needs.
+
+This is opt-in per package. Put a consumer-facing manifest at
+`scripts/release-ivpm.yaml` and `ec_finalize_release` stages it automatically;
+omit the file and the release ships without one. `verilator-bin` needs nothing
+at install time and omits it; `yosys-bin` needs a venv with `click` for `sby`.
+
+It must **not** be a copy of the project's own `ivpm.yaml`. That file describes
+how to *build* the package — tool sources, `edapack-common`, test deps — and
+shipping it makes a consumer fetch all of it. `ec_stage_release_ivpm` rejects a
+byte-identical copy and warns if the manifest mentions a `default-dev` dep-set.
+
+```yaml
+# scripts/release-ivpm.yaml — what a consumer needs, nothing more
+package:
+  name: yosys-bin
+  env:
+  - name: PATH
+    path-prepend: "${IVPM_PACKAGES}/yosys-bin/bin"
+  dep-sets:
+  - name: default
+    deps:
+    - name: click
+      src: pypi
+```
 
 ## Release tracks
 

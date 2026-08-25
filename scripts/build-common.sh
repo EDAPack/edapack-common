@@ -154,6 +154,45 @@ ec_copy_envrc() {
     cp "$envrc" "$release_root/export.envrc"
 }
 
+# ec_stage_release_ivpm SOURCE_ROOT RELEASE_ROOT
+# Optionally ship a consumer-facing ivpm manifest as <release>/ivpm.yaml.
+#
+# ivpm reads packages/<name>/ivpm.yaml for every installed package, so a
+# manifest inside the tarball is what lets an installed release set PATH and
+# pull its *runtime* requirements — e.g. yosys-bin needs a venv with click for
+# sby, while verilator-bin needs nothing at install time.
+#
+# The source is scripts/release-ivpm.yaml, deliberately NOT the project's own
+# ivpm.yaml: that one says how to *build* the package (tool sources,
+# edapack-common, test deps), and shipping it makes consumers fetch all of it.
+# Packages that need nothing simply omit the file — this is opt-in.
+ec_stage_release_ivpm() {
+    local source_root="$1" release_root="$2"
+    local src="$source_root/scripts/release-ivpm.yaml"
+    local dst="$release_root/ivpm.yaml"
+
+    if [ ! -f "$src" ]; then
+        ec_log "no scripts/release-ivpm.yaml — release ships no ivpm manifest"
+        return 0
+    fi
+
+    grep -q '^package:' "$src" \
+        || ec_die "release-ivpm.yaml: no top-level 'package:' block"
+    grep -qE '^[[:space:]]+name:[[:space:]]*[^[:space:]]' "$src" \
+        || ec_die "release-ivpm.yaml: package has no name"
+
+    # The exact mistake this helper exists to prevent.
+    if [ -f "$source_root/ivpm.yaml" ] && cmp -s "$src" "$source_root/ivpm.yaml"; then
+        ec_die "release-ivpm.yaml is identical to the project's ivpm.yaml; it must describe what a consumer needs at install time, not how to build"
+    fi
+    if grep -q 'default-dev' "$src"; then
+        ec_log "WARNING: release-ivpm.yaml mentions a default-dev dep-set — consumers should not be fetching build tooling"
+    fi
+
+    cp "$src" "$dst"
+    ec_log "staged release ivpm.yaml"
+}
+
 # ec_emit_manifest CANDIDATE_JSON RELEASE_ROOT PLATFORM_JSON
 # Assemble manifest.json into the release root using release metadata from the
 # environment (EC_PACKAGE, EC_VERSION, EC_TAG, EC_TRACK, EC_BUILT_AT,
@@ -206,14 +245,16 @@ PY
 
 # ec_finalize_release SOURCE_ROOT RELEASE_ROOT CANDIDATE_JSON
 # One call to do the standard tail of every build: generate the platform block,
-# stage skills, ship envrc, emit the in-tarball manifest, export a per-platform
-# manifest copy to OUT_DIR (for the publish merge), and enforce presence.
+# stage skills, ship envrc, optionally ship a consumer ivpm manifest, emit the
+# in-tarball manifest, export a per-platform manifest copy to OUT_DIR (for the
+# publish merge), and enforce presence of the mandatory pieces.
 ec_finalize_release() {
     local source_root="$1" release_root="$2" candidate="$3"
     local platform="$WORK_DIR/platform.json"
     ec_platform_json "$platform"
     ec_stage_skills "$source_root" "$release_root" --strict
     ec_copy_envrc "$source_root" "$release_root"
+    ec_stage_release_ivpm "$source_root" "$release_root"
     ec_emit_manifest "$candidate" "$release_root" "$platform"
     ec_require_file "$release_root/skills/index.json" "skills/index.json"
     ec_require_file "$release_root/export.envrc" "export.envrc"

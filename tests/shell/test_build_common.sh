@@ -137,5 +137,45 @@ JSON
     [ "$EC_TAG" = "v$EC_VERSION" ] || exit 1
 ) && ok "ec_prepare_candidate derives <core>.<date> version" || bad "ec_prepare_candidate version"
 
+# --- ec_stage_release_ivpm: opt-in consumer manifest ------------------------
+(
+    src="$SANDBOX/ri/src"; rel="$SANDBOX/ri/rel"; mkdir -p "$src/scripts" "$rel"
+    # absent -> no ivpm.yaml shipped, and that is not an error
+    ec_stage_release_ivpm "$src" "$rel" >/dev/null || exit 1
+    [ ! -f "$rel/ivpm.yaml" ] || exit 1
+) && ok "ec_stage_release_ivpm ships nothing when release-ivpm.yaml is absent" \
+  || bad "ec_stage_release_ivpm absent"
+
+(
+    src="$SANDBOX/ri2/src"; rel="$SANDBOX/ri2/rel"; mkdir -p "$src/scripts" "$rel"
+    cat > "$src/scripts/release-ivpm.yaml" <<'YAML'
+package:
+  name: widget-bin
+  env:
+  - name: PATH
+    path-prepend: "${IVPM_PACKAGES}/widget-bin/bin"
+YAML
+    ec_stage_release_ivpm "$src" "$rel" >/dev/null || exit 1
+    grep -q 'widget-bin/bin' "$rel/ivpm.yaml"
+) && ok "ec_stage_release_ivpm stages release-ivpm.yaml as ivpm.yaml" \
+  || bad "ec_stage_release_ivpm present"
+
+(
+    src="$SANDBOX/ri3/src"; rel="$SANDBOX/ri3/rel"; mkdir -p "$src/scripts" "$rel"
+    # shipping the project's own build manifest is the mistake to catch
+    printf 'package:\n  name: widget-bin\n  dep-sets:\n  - name: default-dev\n' \
+        > "$src/ivpm.yaml"
+    cp "$src/ivpm.yaml" "$src/scripts/release-ivpm.yaml"
+    ! ( ec_stage_release_ivpm "$src" "$rel" >/dev/null 2>&1 )
+) && ok "ec_stage_release_ivpm rejects a copy of the project's ivpm.yaml" \
+  || bad "ec_stage_release_ivpm dev-manifest guard"
+
+(
+    src="$SANDBOX/ri4/src"; rel="$SANDBOX/ri4/rel"; mkdir -p "$src/scripts" "$rel"
+    printf 'name: not-a-package\n' > "$src/scripts/release-ivpm.yaml"
+    ! ( ec_stage_release_ivpm "$src" "$rel" >/dev/null 2>&1 )
+) && ok "ec_stage_release_ivpm rejects a manifest with no package block" \
+  || bad "ec_stage_release_ivpm structure guard"
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]
