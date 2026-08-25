@@ -232,8 +232,16 @@ ec_make_tarball() {
     out="$OUT_DIR/$name"
     ec_log "packaging $out"
     tar -C "$parent" -czf "$out" "$base"
+    # macOS has no sha256sum, only `shasum -a 256` (same output format). This
+    # used to skip silently there, so macOS tarballs shipped without the
+    # checksum every other platform got. Never skip: a release asset without a
+    # checksum is a defect, not a platform quirk.
     if command -v sha256sum >/dev/null 2>&1; then
         ( cd "$OUT_DIR" && sha256sum "$name" > "$name.sha256" )
+    elif command -v shasum >/dev/null 2>&1; then
+        ( cd "$OUT_DIR" && shasum -a 256 "$name" > "$name.sha256" )
+    else
+        ec_die "no sha256sum or shasum available to checksum $name"
     fi
     printf '%s\n' "$out"
 }
