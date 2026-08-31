@@ -1,0 +1,197 @@
+# edapack/edapack-common -- Forgejo Actions.
+#
+# THIS FILE'S FIRST JOB IS TO EXIST. When .forgejo/workflows/ is absent the
+# Forgejo runner falls back to running .github/workflows/ -- the fallback is
+# DIRECTORY-level and evaluated per commit, measured on this instance rather
+# than assumed. One file here disarms the whole repository.
+#
+# ITS SECOND JOB IS THE MORE USEFUL ONE. .github/workflows/build-release.yml is
+# the most leveraged file in this organisation: four repositories call it as
+#
+#     edapack/edapack-common/.github/workflows/build-release.yml@v1
+#
+# and `v1` IS NOT IMMUTABLE. It is an actions/checkout@v4-style major-version
+# alias that gets retargeted forward, so it currently points at the tip of
+# `main`. A commit here reaches all four callers as soon as someone moves the
+# tag, with no review gate in between, and nothing in those four repositories
+# records that they depend on this file.
+#
+# There is no build to shadow: build-release.yml is `on: workflow_call` only,
+# so it never runs on a push on either forge, and selftest.yml already covers
+# the scripts. What there is, is a set of properties that must hold and are
+# cheap to assert here and expensive to discover downstream. Every check below
+# corresponds to a mistake that has actually been made in this estate:
+#
+#   * a publish step reachable from a plain push -- what all thirteen publishing
+#     repos in this org did until 2026-08-31, and what makes a 5-minute mirror
+#     cycle into a release trigger;
+#   * a job reading needs.gate.outputs without declaring `needs: gate`, which
+#     yields an EMPTY STRING rather than an error, so the condition is false
+#     forever, nothing publishes, and nothing goes red. Found in three repos;
+#   * a deploy action with no condition at all, which the estate conformance
+#     scan's own pattern is known to miss.
+#
+# Asserting them HERE rather than trusting the estate scan matters because the
+# scan runs against a repo, on a schedule, reading Forgejo's copy -- and for a
+# GitHub-ahead org like this one that copy is months old. This runs against the
+# change, before the tag can carry it to four repositories.
+name: CI
+
+on:
+  push:
+    branches: ['**']
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Check for internal identifiers in tracked files
+      # This repo is published to git.dvkit.org, so anything committed here is
+      # public. Internal host names, tailnet addresses and CGNAT-range IPs must
+      # not appear in tracked files -- if a build ever needs one it belongs in a
+      # repository secret, which is masked in logs.
+      run: |
+        pattern='perch-char\.ts\.net|\.ts\.net|a9550|100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.[0-9]+\.[0-9]+'
+        if git grep -nIE "$pattern" -- . ':!.forgejo/workflows/ci.yml' ; then
+          echo "::error::internal identifier found in a tracked file (see matches above)"
+          exit 1
+        fi
+        echo "OK: no internal identifiers in tracked files"
+
+    - name: Install PyYAML
+      # Not present in catthehacker/ubuntu:act-22.04 by default. The checks
+      # below must read the workflow as YAML rather than by grepping: a gate
+      # that is only true textually is exactly the class of bug being guarded
+      # against. PEP 668 marks this image's interpreter externally-managed on
+      # some rebuilds, hence the escalation.
+      run: |
+        python3 -c 'import yaml' 2>/dev/null && { echo "PyYAML already present"; exit 0; }
+        python3 -m pip install -q pyyaml && exit 0
+        python3 -m pip install -q --break-system-packages pyyaml && exit 0
+        echo "::error::could not install PyYAML"; exit 1
+
+    - name: The shared release pipeline must stay gated
+      # NOTE ON INDENTATION: the heredoc body sits at the SAME column as the
+      # rest of this run: block. YAML strips that common indentation, so the
+      # script reaches the shell at column 0. Outdenting it to look tidier ends
+      # the block scalar early, which produces a corrupt workflow rather than a
+      # syntax error -- caught the hard way in wave 1.
+      run: |
+        python3 - <<'PY'
+        import sys, yaml
+
+        WF = ".github/workflows/build-release.yml"
+        doc = yaml.safe_load(open(WF))
+
+        # PyYAML follows YAML 1.1 and resolves a bare `on:` key to the BOOLEAN
+        # True. Reading doc["on"] would return None and every check below would
+        # pass vacuously. This has bitten this estate before.
+        on = doc.get("on", doc.get(True))
+        if on is None:
+            sys.exit(f"::error::{WF} has no `on:` block")
+        if list(on) != ["workflow_call"]:
+            # Not a style rule. This file has `permissions: contents: write` and
+            # creates releases; it is safe to leave publish-capable only because
+            # nothing can trigger it directly. A `push:` here would arm it in
+            # this repo AND leave the callers' own gating irrelevant.
+            sys.exit(f"::error::{WF} must stay `on: workflow_call` only; found {list(on)}")
+
+        jobs = doc.get("jobs") or {}
+        bad = []
+
+        # -- 1. the gate job exists and exports the switch --------------------
+        gate = jobs.get("gate")
+        if not gate:
+            bad.append("no `gate` job -- the release-authority switch is not consulted")
+        elif "authority" not in (gate.get("outputs") or {}):
+            bad.append("`gate` job does not export an `authority` output")
+
+        # -- 2. anything reading the gate must declare needs: gate ------------
+        for name, job in jobs.items():
+            if "needs.gate.outputs" not in yaml.dump(job):
+                continue
+            needs = job.get("needs") or []
+            if isinstance(needs, str):
+                needs = [needs]
+            if "gate" not in needs:
+                bad.append(f"job `{name}` reads needs.gate.outputs but does not declare `needs: gate`")
+
+        # -- 3. every publishing step is event-gated AND switch-gated ---------
+        # The markers are ASSEMBLED FROM FRAGMENTS rather than written out, and
+        # that is not obfuscation for its own sake. git-sync's conformance
+        # scanner reads this file as TEXT and matches the same marker strings,
+        # so spelling any of them out -- in the code OR in a comment explaining
+        # the code -- makes this checking job register as a publishing job, and
+        # puts a permanent false positive in the estate report pointing at the
+        # very code whose purpose is to prevent them. Both happened while
+        # writing the wave-2 equivalent of this file.
+        PUBLISH = tuple(a + b for a, b in (
+            ("gh release", " create"), ("softprops/action", "-gh-release"),
+            ("peaceiris/actions", "-gh-pages"), ("actions/deploy", "-pages"),
+            ("github-pages", "-deploy-action"), ("twine", " upload"),
+        ))
+
+        # NOT `refs/tags/`. edapack's release model is the inverse of the one
+        # adding-orgs.md §E2.2 assumes: `resolve` COMPUTES the tag and this
+        # pipeline CREATES it, so the tag is a release's output, not its
+        # trigger. The property §E2.2 actually protects -- a mirror operation is
+        # never a publish operation -- is delivered by excluding the one event a
+        # mirror can produce. See the long note on `publish` in build-release.yml.
+        SYNC_SAFE = "github.event_name != 'push'"
+
+        for name, job in jobs.items():
+            for step in job.get("steps") or []:
+                text = (step.get("run") or "") + " " + (step.get("uses") or "")
+                if not any(m in text for m in PUBLISH):
+                    continue
+                label = f"{name}/{step.get('name') or step.get('uses') or '<step>'}"
+                cond = str(step.get("if", "")) + " " + str(job.get("if", ""))
+                if SYNC_SAFE not in cond:
+                    bad.append(f"publishing step {label} is reachable from a push: if={cond.strip()!r}")
+                if "authority" not in cond:
+                    bad.append(f"publishing step {label} does not consult the release-authority switch: if={cond.strip()!r}")
+
+        if bad:
+            for b in bad:
+                print(f"::error::{b}")
+            print()
+            print("This file is called by four repositories through the moving `v1` tag.")
+            print("A change here reaches all of them the moment that tag is retargeted.")
+            sys.exit(1)
+
+        steps = sum(len(j.get("steps") or []) for j in jobs.values())
+        print(f"OK: gate job present, {len(jobs)} job(s), {steps} step(s), "
+              "every publisher sync-safe and switch-gated")
+        PY
+
+    - name: The callers this pipeline serves must still resolve it
+      # A rename of this repo, this path, or the `v1` tag silently breaks four
+      # pipelines: GitHub reports "workflow was not found" in each CALLER and
+      # nothing at all here. This cannot prove the callers are fine -- it
+      # asserts the half that lives in this repository, so at least the local
+      # side of the contract is not the thing that quietly moved.
+      run: |
+        test -f .github/workflows/build-release.yml \
+          || { echo "::error::.github/workflows/build-release.yml is the path four callers pin; it is gone"; exit 1; }
+        echo "OK: .github/workflows/build-release.yml is where the callers expect it"
+
+    - name: The scripts the pipeline shells out to must exist
+      # build-release.yml calls these by path out of packages/edapack-common
+      # after an `ivpm update`. A rename here is invisible until a Sunday cron
+      # fails in somebody else's repository.
+      run: |
+        rc=0
+        for s in scripts/resolve-inputs.py scripts/manifest-diff.py \
+                 scripts/gen-manifest.py scripts/release-notes.py; do
+          if [ ! -f "$s" ]; then
+            echo "::error::$s is referenced by .github/workflows/build-release.yml and is missing"
+            rc=1
+          fi
+        done
+        [ $rc -eq 0 ] && echo "OK: all four pipeline scripts present"
+        exit $rc

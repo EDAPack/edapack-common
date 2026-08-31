@@ -69,6 +69,65 @@ permissions:
 
 jobs:
   # --------------------------------------------------------------------- #
+  # gate: the release master switch. ONE file, above both forges, decides who
+  # is allowed to publish this repo:
+  #     https://dvkit.org/.well-known/release-authority.json
+  # It is generated from sync-policy.toml by `git-sync emit-release-authority`,
+  # so GitHub and Forgejo cannot drift apart -- there is only one copy for them
+  # to disagree about. The runner only READS it, over plain HTTPS with no
+  # credential: a workflow file is public and editable by anyone who can push,
+  # so a secret here would protect nothing.
+  #
+  # WHY A SEPARATE JOB. `if:` on a job cannot reference a step in its own job,
+  # so the switch is resolved here and consumed via needs.gate.outputs.authority.
+  # That requires `needs: gate` on the consuming job -- declared on `publish`
+  # below. OMIT IT AND THE EXPRESSION IS AN EMPTY STRING: nothing publishes,
+  # nothing goes red, and the repo quietly stops releasing. Three repos in this
+  # estate had that bug.
+  #
+  # NAMING: this JOB is `gate`, matching the other 50-odd repos in the estate.
+  # `resolve` separately has a STEP with `id: gate` (the input-change gate).
+  # Different namespaces, and they are never referenced together: the step is
+  # `steps.gate.*` inside `resolve`, this job is `needs.gate.*` from `publish`.
+  # --------------------------------------------------------------------- #
+  gate:
+    name: Release authority
+    runs-on: ubuntu-latest
+    outputs:
+      authority: ${{ steps.resolve.outputs.authority }}
+    steps:
+      - id: resolve
+        # The python is ONE LINE on purpose: a multi-line `python3 -c` body has
+        # to start at column 0, which terminates the YAML block scalar above it
+        # and silently corrupts the workflow rather than failing to parse.
+        run: |
+          url=https://dvkit.org/.well-known/release-authority.json
+          if ! body=$(curl -fsS --max-time 10 "$url"); then
+            # DECIDED 2026-08-30: fail CLOSED when a release could actually
+            # happen. A release blocked by a dvkit.org outage is recoverable in
+            # ten minutes; a release published twice from two forges is not,
+            # and a GitHub Release tag can be deleted but the artifacts people
+            # already downloaded cannot be recalled.
+            #
+            # For edapack "when a release could actually happen" is not a tag
+            # (see the note on `publish` below) -- it is any event that is not
+            # a push. A push never publishes here, so an unreachable switch on
+            # a push is quiet.
+            case "$GITHUB_EVENT_NAME" in
+              push)
+                echo "authority=none" >> "$GITHUB_OUTPUT"
+                echo "switch unreachable on a push; nothing to release"
+                exit 0 ;;
+              *)
+                echo "::error::release-authority switch unreachable; refusing to publish"
+                exit 1 ;;
+            esac
+          fi
+          auth=$(printf '%s' "$body" | python3 -c 'import json,os,sys; d=json.load(sys.stdin); r=os.environ["GITHUB_REPOSITORY"]; print(d["repos"].get(r) or d["orgs"].get(r.split("/")[0]) or d["default"])')
+          echo "release authority for $GITHUB_REPOSITORY: $auth"
+          echo "authority=$auth" >> "$GITHUB_OUTPUT"
+
+  # --------------------------------------------------------------------- #
   # resolve: fetch edapack-common (via ivpm), resolve input versions, and
   # decide whether a release is needed by diffing the last published manifest.
   # --------------------------------------------------------------------- #
@@ -381,9 +440,58 @@ jobs:
   # --------------------------------------------------------------------- #
   # publish: merge per-platform manifests, create the release, upload assets.
   # --------------------------------------------------------------------- #
+  # --------------------------------------------------------------------- #
+  # publish: create the GitHub Release. THREE conditions, and each one is load-
+  # bearing for a different reason.
+  #
+  #   build_needed == 'true'      the original change gate: upstream moved, or
+  #                               someone passed force.
+  #
+  #   github.event_name != 'push' SYNC SAFETY, added 2026-08-31 when edapack
+  #                               entered the Forgejo <-> GitHub mirror. This
+  #                               repo's history now moves between two forges on
+  #                               a 5-minute cron, and `git-sync` produces
+  #                               exactly one kind of event: a push. Without
+  #                               this clause A SYNC CYCLE IS A RELEASE TRIGGER
+  #                               -- manifest-diff.py says so in its own words,
+  #                               "trigger is push -> build (CI always builds
+  #                               pushes)" -- and a mirror operation must never
+  #                               be a publishing operation.
+  #
+  #                               DELIBERATE DEVIATION from adding-orgs.md
+  #                               §E2.2, which requires publish jobs to be gated
+  #                               on a `v*` tag and nothing else. That rule is
+  #                               written for repos where a human pushes a tag
+  #                               and the tag IS the version. Here the tag is
+  #                               computed by `resolve` and created BY this job
+  #                               -- it is the output of a release, not its
+  #                               trigger -- so tag-gating a job whose purpose
+  #                               is to create the tag is not a stricter rule,
+  #                               it is an unsatisfiable one. What §E2.2 exists
+  #                               to protect is the property on the line above,
+  #                               and this clause delivers it exactly.
+  #
+  #                               `schedule` and `workflow_dispatch` still
+  #                               publish. Neither is something a mirror
+  #                               performs.
+  #
+  #                               COST: a recipe commit no longer produces a
+  #                               dev-track pre-release; the next scheduled run
+  #                               does. The build still runs on push, which is
+  #                               the whole value of push CI here.
+  #
+  #   authority == 'github'       so that with the same cron on both forges,
+  #                               only one of them publishes. SKIPS rather than
+  #                               fails when the switch names Forgejo: a
+  #                               deliberate handover must not look like a
+  #                               broken pipeline.
+  # --------------------------------------------------------------------- #
   publish:
-    needs: [resolve, build]
-    if: needs.resolve.outputs.build_needed == 'true'
+    needs: [gate, resolve, build]
+    if: >-
+      needs.resolve.outputs.build_needed == 'true' &&
+      github.event_name != 'push' &&
+      needs.gate.outputs.authority == 'github'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
