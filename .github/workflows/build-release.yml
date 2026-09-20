@@ -544,6 +544,33 @@ jobs:
           find artifacts -name '*.tar.gz' -exec cp {} upload/ \;
           find artifacts -name '*.sha256' -exec cp {} upload/ \;
           cp manifest.json upload/
+
+      # Optional per-tool addition to the release body. This is the only place
+      # in the pipeline where the BUILT ARTIFACTS and their checksums exist at
+      # once, which is what makes it worth a hook: a tool repo can say things
+      # about the release that can only be derived from the binaries it just
+      # produced (verible-bin diffs the shipped lint rules and formatter flags
+      # against the previous release, so the notes state behavior changes
+      # rather than asserting them).
+      #
+      # Contract: scripts/release-notes-hook.sh <artifacts-dir> <upload-dir>,
+      # markdown on stdout, appended to the body. Soft-fails on purpose -- a
+      # broken hook must not block a release that is otherwise ready.
+      - name: Tool-repo release-notes hook
+        id: hook
+        if: hashFiles('scripts/release-notes-hook.sh') != ''
+        continue-on-error: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EC_PACKAGE: ${{ inputs.package }}
+          EC_VERSION: ${{ needs.resolve.outputs.version }}
+          EC_TAG: ${{ needs.resolve.outputs.tag }}
+          EC_TRACK: ${{ inputs.track }}
+          EC_REPO: ${{ github.repository }}
+        run: |
+          bash scripts/release-notes-hook.sh artifacts upload > notes-extra.md
+          echo "--- hook output ---"; cat notes-extra.md
+
       - name: Create release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -558,6 +585,11 @@ jobs:
               echo; echo "### Input changes since last release"; echo
               echo "${{ needs.resolve.outputs.changed_summary }}"
             } > "$notes"
+          fi
+          # `continue-on-error` above leaves a partial file behind on failure,
+          # so test for content rather than existence.
+          if [ -s notes-extra.md ]; then
+            { echo; cat notes-extra.md; } >> "$notes"
           fi
           # The release track publishes a full release and takes `latest`. A dev
           # build that opts out of prerelease is a full release too, so it takes

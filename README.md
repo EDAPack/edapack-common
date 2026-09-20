@@ -87,6 +87,21 @@ not match upstream's (`yosys-0.50` upstream vs `v0.50` here).
 Both forms soft-fail: a changelog reformat or a GitHub API hiccup drops back to
 the default notes rather than blocking a release.
 
+### Adding to the body from a tool repo
+
+An optional `scripts/release-notes-hook.sh` in the tool repo is run during
+publish and its stdout is appended to the body:
+
+```sh
+scripts/release-notes-hook.sh <artifacts-dir> <upload-dir>   # markdown on stdout
+```
+
+Publish is the only stage where the built artifacts and their checksums all
+exist at once, so this is the place for anything that must be *derived from the
+binaries* rather than asserted. `verible-bin` uses it to diff the shipped lint
+rules and formatter flags against the previous release. The hook is
+`continue-on-error`: a broken hook must not block a release.
+
 ## Release tracks
 
 `build-release.yml` takes a `track` input. A tool repo calls it once per track.
