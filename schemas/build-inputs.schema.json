@@ -47,7 +47,7 @@
         },
         "release_notes": {
           "type": "string",
-          "description": "Core only. Path to the upstream changelog in the core repo, e.g. Changes. Its section for the built version becomes the release body on the release track."
+          "description": "Core only. Either a path to the upstream changelog in the core repo (e.g. Changes), whose section for the built version becomes the release body on the release track; or the literal 'gh-compare', for an upstream with no changelog and empty release bodies, which instead lists the pull requests merged between the previously released upstream ref and this one."
         },
         "track": {
           "type": "boolean",

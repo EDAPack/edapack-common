@@ -218,9 +218,11 @@ jobs:
       # which excludes pre-releases — the dev track would diff against a
       # hand-promoted release rather than last week's build. Walk releases
       # newest-first instead and take the first manifest matching this track.
+      # Runs on BOTH tracks. The dev track uses it as the change-gate baseline;
+      # the release track uses only `previous_core_ref` (below), to tell
+      # release-notes.py's compare mode where the last release left off.
       - name: Fetch last release manifest for this track
         id: prev
-        if: inputs.track == 'dev'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TRACK: ${{ inputs.track }}
@@ -244,6 +246,27 @@ jobs:
           done
           [ "$previous" = none ] && echo "no prior $TRACK release found"
           echo "previous=${previous}" >> "$GITHUB_OUTPUT"
+
+      # The upstream ref the PREVIOUS release was built from. This is what
+      # release-notes.py's compare mode needs, and it is NOT the previous git
+      # tag of this repo: a tool repo's tag and its upstream's tag need not
+      # agree (upstream `yosys-0.50` vs our `v0.50`). The manifest records the
+      # upstream ref precisely so this question has an exact answer.
+      - name: Previous upstream ref
+        id: prevref
+        run: |
+          ref=""
+          if [ -f "${{ steps.prev.outputs.previous }}" ]; then
+            ref="$(python3 -c '
+          import json, sys
+          m = json.load(open(sys.argv[1]))
+          print(next((i.get("ref", "") for i in m.get("inputs", [])
+                      if i.get("role") == "core"), ""))
+          ' "${{ steps.prev.outputs.previous }}")"
+          fi
+          [ -n "$ref" ] && echo "previous upstream ref: $ref" \
+                        || echo "no previous upstream ref (first release?)"
+          echo "previous_core_ref=${ref}" >> "$GITHUB_OUTPUT"
 
       - name: Change gate
         id: gate
@@ -301,9 +324,13 @@ jobs:
           echo "version=${version}" >> "$GITHUB_OUTPUT"
           echo "tag=v${version}" >> "$GITHUB_OUTPUT"
 
-      # Verilator-style upstreams publish tags but no GitHub Releases, so the
-      # release body comes from their changelog at the built SHA. Soft-fails:
-      # a changelog reformat must not block a release (exit 2 -> default notes).
+      # Where the release body comes from. Verilator-style upstreams publish
+      # tags but no GitHub Releases, so it is their changelog at the built SHA.
+      # Verible-style upstreams have neither a changelog nor a release body, so
+      # `release_notes: gh-compare` instead lists the pull requests merged since
+      # the previous release's upstream ref. Soft-fails either way: a changelog
+      # reformat or an API hiccup must not block a release (exit 2 -> default
+      # notes).
       - name: Extract upstream release notes
         id: notes
         if: inputs.track == 'release' && steps.gate.outputs.build_needed == 'true'
@@ -311,12 +338,14 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           EC=packages/edapack-common
-          # The changelog path rides along in candidate.json (core.release_notes),
-          # so there is no second YAML parse here. Exit 2 = no notes available.
+          # The changelog path (or the gh-compare sentinel) rides along in
+          # candidate.json (core.release_notes), so there is no second YAML
+          # parse here. Exit 2 = no notes available.
           if python3 "$EC/scripts/release-notes.py" \
                --candidate candidate.json \
                --package "${{ inputs.package }}" \
                --version "${{ steps.version.outputs.version }}" \
+               --previous-ref "${{ steps.prevref.outputs.previous_core_ref }}" \
                --output release-notes.md; then
             echo "have_notes=true" >> "$GITHUB_OUTPUT"
           else
@@ -530,13 +559,17 @@ jobs:
               echo "${{ needs.resolve.outputs.changed_summary }}"
             } > "$notes"
           fi
-          # The release track publishes a full release and takes `latest`; the
-          # dev track is always a pre-release and must never move `latest`.
+          # The release track publishes a full release and takes `latest`. A dev
+          # build that opts out of prerelease is a full release too, so it takes
+          # `latest` as well -- single-track repos have no release track to hold
+          # that pointer, and leaving it behind strands it on a stale release.
+          # A dev build that *is* a prerelease must never move `latest`.
           if [ "${{ inputs.track }}" = release ]; then
             flags="--latest"
+          elif [ "${{ inputs.prerelease }}" = "true" ]; then
+            flags="--prerelease --latest=false"
           else
-            flags="--latest=false"
-            [ "${{ inputs.prerelease }}" = "true" ] && flags="--prerelease --latest=false"
+            flags="--latest"
           fi
           gh release create "${{ needs.resolve.outputs.tag }}" \
             --repo "${{ github.repository }}" \

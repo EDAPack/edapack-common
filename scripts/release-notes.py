@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
-"""Extract an upstream changelog section for the version being released.
+"""Build the release body describing what changed upstream.
 
+Two modes, selected by `core.release_notes` in build-inputs.yaml.
+
+CHANGELOG MODE (`release_notes: <path>`)
 Some upstream projects (Verilator among them) publish git tags but no GitHub
 Releases, so there is no release body to copy. The equivalent content is the
 changelog file in the repo, whose newest section at a tag describes that tag.
-`core.release_notes` in build-inputs.yaml names that file; this script pulls it
-at the resolved SHA and slices out the section for `--version`.
+`core.release_notes` names that file; this script pulls it at the resolved SHA
+and slices out the section for `--version`.
 
 Recognized section headings (the leading line of a section):
 
@@ -17,9 +20,29 @@ A section ends at the next heading of the same shape. The `===`/`---` underline
 is dropped: GitHub renders release bodies as Markdown, where an underline would
 promote the preceding line to a heading.
 
-Failure is deliberately soft — an upstream changelog reformat must not block a
-release. Exit code 2 means "no section found, publish default notes"; the caller
-treats that as non-fatal. Exit 1 is a usage error.
+COMPARE MODE (`release_notes: gh-compare`)
+Other upstreams have no changelog at all AND publish empty release bodies —
+Verible is the case this was written for: 40 consecutive releases, every one
+with a zero-length body and no changelog file in the tree. The only description
+of what changed is the commit range itself, so this mode asks GitHub to compare
+the previously released upstream ref with this one and renders the MERGED PULL
+REQUESTS in that range.
+
+Pull requests, not commits, and the distinction is the whole point: a repo that
+does not squash-merge has a commit log that is mostly `Merge branch 'x' into
+master` and `Fixed formatting`. The PR titles underneath are written for humans.
+Commit subjects are used only as a fallback when a range contains no
+recognizable PR merges at all.
+
+The previous upstream ref comes from the previous release's manifest.json
+(`inputs[core].ref`), which is what manifest provenance is for — it is NOT the
+previous git tag of this repo, because a tool repo's tag and its upstream's tag
+need not agree (`yosys-0.50` upstream vs `v0.50` here).
+
+Failure is deliberately soft in both modes — an upstream changelog reformat, or
+a GitHub API hiccup, must not block a release. Exit code 2 means "no notes
+available, publish default notes"; the caller treats that as non-fatal. Exit 1
+is a usage error.
 """
 
 # NOTE: no `from __future__ import annotations` — must run under the
@@ -102,7 +125,160 @@ def _upstream_url(repo: str, ref: str) -> str:
     return "{}/releases/tag/{}".format(repo.rstrip("/").replace(".git", ""), ref)
 
 
-def main(argv=None) -> int:
+# --------------------------------------------------------------------------- #
+# Compare mode
+# --------------------------------------------------------------------------- #
+COMPARE_SENTINEL = "gh-compare"
+
+# `Merge pull request #2592 from fangism/verible-cl-972730734` — GitHub's own
+# merge-commit subject. The PR title is the first non-empty line below it.
+_MERGE_PR_RE = re.compile(r"^Merge pull request #(\d+) from ")
+# `Fix the thing (#2592)` — the squash-merge subject shape.
+_SQUASH_PR_RE = re.compile(r"^(.*?)\s*\(#(\d+)\)\s*$")
+# Commit subjects that carry no information for a reader of release notes.
+_NOISE_RE = re.compile(
+    r"^(Merge (branch|remote-tracking branch|origin/|pull request)"
+    r"|Fixed? formatting"
+    r"|Update from upstream"
+    r"|Bump \S+ from)",
+    re.I,
+)
+
+
+def extract_prs(commits):
+    """Return [(number, title)] for the pull requests merged in `commits`.
+
+    Two shapes are recognized, and merge commits WIN WHOLESALE rather than
+    being blended with squash subjects. A repo either squash-merges or it does
+    not, and mixing the two heuristics actively produces garbage: in a
+    non-squash repo every branch commit is present in the range, and a branch
+    commit whose subject ends in an issue reference —
+
+        Fix indentation of `let` (#868) (#2001) (#2348)
+
+    — is indistinguishable from a squash merge of PR #2348. Verible's real
+    history produced exactly that, listing one change twice under two numbers.
+    So: if any merge-commit PRs were found, they are the answer.
+
+    Dedupes by number, preserving the order GitHub returned (oldest first).
+    """
+    merged, squashed = [], []
+    for c in commits:
+        message = ((c.get("commit") or {}).get("message") or "")
+        lines = message.splitlines()
+        if not lines:
+            continue
+        subject = lines[0].strip()
+
+        m = _MERGE_PR_RE.match(subject)
+        if m:
+            title = next((ln.strip() for ln in lines[1:] if ln.strip()), "")
+            if not title:
+                # A merge commit whose body was stripped tells us nothing more
+                # than the number; keep it rather than dropping the PR.
+                title = "(no title)"
+            merged.append((m.group(1), title))
+            continue
+
+        m = _SQUASH_PR_RE.match(subject)
+        if m and m.group(1).strip():
+            squashed.append((m.group(2), m.group(1).strip()))
+
+    out, seen = [], set()
+    for number, title in (merged or squashed):
+        if number in seen:
+            continue
+        seen.add(number)
+        out.append((number, title))
+    return out
+
+
+def extract_commit_subjects(commits):
+    """Fallback for a range with no recognizable PR merges: useful subjects."""
+    out, seen = [], set()
+    for c in commits:
+        message = ((c.get("commit") or {}).get("message") or "")
+        subject = message.splitlines()[0].strip() if message.splitlines() else ""
+        if not subject or _NOISE_RE.match(subject) or subject in seen:
+            continue
+        seen.add(subject)
+        out.append(subject)
+    return out
+
+
+def render_compare(package, version, upstream_url, compare, previous_ref,
+                   max_entries=40):
+    """Render the body for a range comparison.
+
+    `compare` is the GitHub compare API payload. Returns markdown.
+    """
+    commits = compare.get("commits") or []
+    total = compare.get("total_commits", len(commits))
+    compare_url = compare.get("html_url") or ""
+
+    prs = extract_prs(commits)
+    if prs:
+        kind = "merged pull request" + ("s" if len(prs) != 1 else "")
+        entries = ["- #{} {}".format(n, t) for n, t in prs]
+    else:
+        subjects = extract_commit_subjects(commits)
+        kind = "change" + ("s" if len(subjects) != 1 else "")
+        entries = ["- {}".format(s) for s in subjects]
+
+    shown = entries[:max_entries]
+    hidden = len(entries) - len(shown)
+
+    lines = [
+        "Automated build of {} {}.".format(package, version),
+        "",
+        "Upstream: {}".format(upstream_url),
+        "",
+        "## Upstream changes",
+        "",
+        "{} commit{} since `{}` — {} {}:".format(
+            total, "" if total == 1 else "s", previous_ref, len(entries), kind),
+        "",
+    ]
+    lines.extend(shown)
+    if hidden > 0:
+        lines.append("- …and {} more.".format(hidden))
+    # The compare API returns at most 250 commits; say so rather than letting a
+    # big range look complete when it is not.
+    if len(commits) < total:
+        lines.append("")
+        lines.append(
+            "_Listing derived from the first {} of {} commits (GitHub compare "
+            "API limit)._".format(len(commits), total))
+    if compare_url:
+        lines.extend(["", "[Full diff]({})".format(compare_url)])
+    return "\n".join(lines) + "\n"
+
+
+def render_first_release(package, version, upstream_url):
+    """No previous release to compare against — still say what this is."""
+    return (
+        "Automated build of {pkg} {ver}.\n\n"
+        "Upstream: {url}\n\n"
+        "## Upstream changes\n\n"
+        "First release of {pkg}; there is no previous build to compare "
+        "against.\n"
+    ).format(pkg=package, ver=version, url=upstream_url)
+
+
+def _default_backend():
+    """The real network backend, imported late so --help needs no network."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "resolve_inputs", str(Path(__file__).resolve().parent / "resolve-inputs.py")
+    )
+    ri = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(ri)
+    return ri.GitBackend()
+
+
+def main(argv=None, backend=None) -> int:
+    """`backend` is injectable so the wiring below is testable offline."""
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument("--candidate", required=True, type=Path,
                    help="resolve-inputs.py output: core repo/ref + release_notes path.")
@@ -111,6 +287,12 @@ def main(argv=None) -> int:
                         "candidate's release_notes (from core.release_notes).")
     p.add_argument("--package", required=True)
     p.add_argument("--version", required=True, help="Version being released.")
+    p.add_argument("--previous-ref", default=None,
+                   help="Compare mode: the upstream ref the PREVIOUS release "
+                        "was built from (from its manifest's inputs[core].ref). "
+                        "Omit for a first release.")
+    p.add_argument("--max-entries", type=int, default=40,
+                   help="Compare mode: cap the listed pull requests.")
     p.add_argument("--output", type=Path, required=True)
     args = p.parse_args(argv)
 
@@ -125,17 +307,38 @@ def main(argv=None) -> int:
         print("release-notes: no release_notes declared", file=sys.stderr)
         return 2
 
-    # Imported late so a missing network backend can't break --help.
-    import importlib.util
+    upstream_url = _upstream_url(core["repo"], core["ref"])
 
-    spec = importlib.util.spec_from_file_location(
-        "resolve_inputs", str(Path(__file__).resolve().parent / "resolve-inputs.py")
-    )
-    ri = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(ri)
+    if notes_path == COMPARE_SENTINEL:
+        if not args.previous_ref:
+            print("release-notes: no --previous-ref; rendering first-release notes",
+                  file=sys.stderr)
+            args.output.write_text(
+                render_first_release(args.package, args.version, upstream_url),
+                encoding="utf-8",
+            )
+            return 0
+        if args.previous_ref == core["ref"]:
+            print("release-notes: previous ref equals this one; nothing to compare",
+                  file=sys.stderr)
+            return 2
+        try:
+            compare = (backend or _default_backend()).compare(
+                core["repo"], args.previous_ref, core["ref"])
+        except Exception as exc:
+            print("release-notes: compare {}...{} failed: {}".format(
+                args.previous_ref, core["ref"], exc), file=sys.stderr)
+            return 2
+        args.output.write_text(
+            render_compare(args.package, args.version, upstream_url, compare,
+                           args.previous_ref, args.max_entries),
+            encoding="utf-8",
+        )
+        return 0
 
     try:
-        text = ri.GitBackend().read_file(core["repo"], core["resolved_sha"], notes_path)
+        text = (backend or _default_backend()).read_file(
+            core["repo"], core["resolved_sha"], notes_path)
     except Exception as exc:
         print("release-notes: cannot read {}: {}".format(notes_path, exc), file=sys.stderr)
         return 2
@@ -149,7 +352,7 @@ def main(argv=None) -> int:
         return 2
 
     args.output.write_text(
-        render(args.package, args.version, section, _upstream_url(core["repo"], core["ref"])),
+        render(args.package, args.version, section, upstream_url),
         encoding="utf-8",
     )
     return 0

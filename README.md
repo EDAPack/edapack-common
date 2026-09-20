@@ -17,7 +17,7 @@ See **[design](../BUILD_CENTRALIZATION_DESIGN.md)** and
 | `scripts/resolve-inputs.py` | Resolve `build-inputs.yaml` (+ overrides) to commit SHAs and an `inputs_digest`, per track. |
 | `scripts/gen-manifest.py` | Assemble per-tarball `manifest.json`; merge into a top-level release manifest; report a manifest's track. |
 | `scripts/manifest-diff.py` | The change-gate: decide `build_needed` by diffing input digests. |
-| `scripts/release-notes.py` | Slice the upstream changelog section for the version being released (release track body). |
+| `scripts/release-notes.py` | Build the release-track body: slice the upstream changelog section for the version being released, or (`gh-compare`) list the pull requests merged since the last release. |
 | `scripts/stage-skills.py` | Validate + stage Agent Skills into a release (canonical copy). |
 | `scripts/build-common.sh` | Shell library sourced by each tool's `build.sh` (`ec_*` helpers). |
 | `scripts/local-build.sh` | Rootless local manylinux build wrapper (+ `clean`). |
@@ -64,6 +64,28 @@ package:
     - name: click
       src: pypi
 ```
+
+## Release notes
+
+The release track's body comes from `core.release_notes` in
+`build-inputs.yaml`, which takes one of two forms:
+
+| Value | Body |
+|---|---|
+| a path, e.g. `Changes` | The upstream changelog's section for the version being built, read at the resolved SHA. |
+| `gh-compare` | The pull requests merged between the previous release's upstream ref and this one. |
+| *(absent)* | Default notes naming the upstream release. |
+
+`gh-compare` exists for upstreams that have no changelog *and* publish empty
+release bodies (Verible: 40 consecutive releases, every body zero-length). It
+lists merged PR titles rather than commit subjects, because a repo that does
+not squash-merge has a commit log that is mostly `Merge branch 'x' into master`
+and `Fixed formatting`. The previous upstream ref is read out of the previous
+release's `manifest.json` — not from this repo's previous git tag, which need
+not match upstream's (`yosys-0.50` upstream vs `v0.50` here).
+
+Both forms soft-fail: a changelog reformat or a GitHub API hiccup drops back to
+the default notes rather than blocking a release.
 
 ## Release tracks
 

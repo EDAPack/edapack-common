@@ -83,6 +83,21 @@ class GitBackend:
             data = json.load(resp)
         return data["tag_name"]
 
+    def compare(self, repo: str, base: str, head: str) -> dict:
+        """Return GitHub's compare payload for `base...head`.
+
+        Used by release-notes.py's compare mode. `per_page=250` is the API
+        maximum; a range longer than that comes back truncated, which the
+        caller reports rather than papers over.
+        """
+        slug = _github_slug(repo)
+        url = "https://api.github.com/repos/{}/compare/{}...{}?per_page=250".format(
+            slug, base, head
+        )
+        req = urllib.request.Request(url, headers=_gh_headers())
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            return json.load(resp)
+
     def read_file(self, repo: str, ref: str, path: str) -> str:
         """Return the text of `path` in `repo` at `ref`, without cloning."""
         import base64
