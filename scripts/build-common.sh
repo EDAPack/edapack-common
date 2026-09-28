@@ -100,11 +100,15 @@ ec_prepare_candidate() {
         [ -n "${input_overrides:-}" ] && [ "${input_overrides}" != "{}" ] \
             && extra+=(--overrides-json "$input_overrides")
         ec_log "resolving inputs locally -> $CANDIDATE_JSON (track=${EC_TRACK:-dev})"
+        # `${extra[@]+"${extra[@]}"}`, not `"${extra[@]}"`: before bash 4.4 an
+        # empty array expands as unbound under `set -u`, and manylinux2014 ships
+        # bash 4.2 -- a local build there with no core_ref/input_overrides died
+        # here with `extra[@]: unbound variable`.
         python3 "$EC_COMMON/scripts/resolve-inputs.py" \
             --build-inputs "$SRC_DIR/build-inputs.yaml" \
             --recipe-sha "$EC_RECIPE_SHA" \
             --track "${EC_TRACK:-dev}" \
-            "${extra[@]}" \
+            ${extra[@]+"${extra[@]}"} \
             --output "$CANDIDATE_JSON"
     fi
     export CANDIDATE_JSON EC_RECIPE_SHA

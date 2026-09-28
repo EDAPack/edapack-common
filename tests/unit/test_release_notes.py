@@ -68,6 +68,39 @@ def test_extract_section_markdown():
     assert "Older news." not in section
 
 
+# xezim's NOTES.md: releases as `###` sections under `#` minor-version banners.
+BANNERED_CHANGELOG = """\
+# What's new in 0.11
+
+### Unreleased
+
+- Not yet.
+
+### 0.11.0 — code coverage (September 2026)
+
+- Coverage.
+
+# What's new in 0.10
+
+### 0.10.6 — assertions (September 2026)
+
+- Older news.
+"""
+
+
+def test_extract_section_stops_at_higher_level_banner():
+    section = rn.extract_section(BANNERED_CHANGELOG, "0.11.0")
+    assert section.startswith("### 0.11.0")
+    assert "Coverage." in section
+    assert "What's new in 0.10" not in section
+    assert "Older news." not in section
+
+
+def test_extract_section_last_before_banner_boundary():
+    section = rn.extract_section(BANNERED_CHANGELOG, "0.10.6")
+    assert "Older news." in section
+
+
 def test_extract_section_absent_version():
     assert rn.extract_section(MD_CHANGELOG, "9.999") is None
 

@@ -91,12 +91,24 @@ def extract_section(text: str, version: str) -> Optional[str]:
         return None
 
     body: List[str] = [lines[start].strip()]
+    # An ATX section also ends at any heading ABOVE its own level, versioned
+    # or not. xezim's NOTES.md groups releases under minor-version banners --
+    #     # What's new in 0.11 / ### 0.11.0 ... / # What's new in 0.10
+    # -- and without this the 0.11.0 notes ended with the next banner.
+    # Strictly above, not at: a same-level unversioned heading may be a
+    # sub-part of the section in some changelog styles.
+    m = re.match(r"^(#{1,6})\s", lines[start].strip())
+    start_level = len(m.group(1)) if m else None
     i = start + 1
     # Drop an RST underline directly beneath the heading.
     if i < len(lines) and _UNDERLINE_RE.match(lines[i]):
         i += 1
     while i < len(lines):
         line = lines[i]
+        if start_level:
+            m = re.match(r"^(#{1,6})\s", line.strip())
+            if m and len(m.group(1)) < start_level:
+                break
         nxt = _heading_version(line)
         # A new section starts here — but only if it is a real heading, i.e. a
         # different version. Underlined or ATX both count.
