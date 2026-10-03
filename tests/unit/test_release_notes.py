@@ -179,6 +179,70 @@ def test_extract_prs_merge_commit_without_a_title():
     assert prs == [("7", "(no title)")]
 
 
+COPYBARA_COMMITS = [
+    # xlsynth/xlsynth v0.55.0..v0.59.0, trimmed: google/xls pull requests
+    # arrive as Copybara merges whose body is only a trailer, next to the
+    # fork's own linear commits.
+    _commit("dslx: reject unreachable match patterns using semantic coverage"),
+    _commit("Merge pull request #4881 from mag-mga:mag-mga/select-to-xor\n\n"
+            "PiperOrigin-RevId: 980085178"),
+    _commit("[opt] Add masked-xor strength reduction for binary selects"),
+    _commit("Merge pull request #5007 from tilir:z3parallel\n\n"
+            "PiperOrigin-RevId: 986122229"),
+    _commit("Allow configuring solver threads for QuickCheck proofs"),
+]
+
+
+def test_imported_merges_with_trailer_bodies_are_not_prs():
+    assert rn.extract_prs(COPYBARA_COMMITS) == []
+
+
+def test_imported_merges_fall_back_to_commit_subjects():
+    out = rn.render_compare("xlsynth-bin", "0.59.0", "U",
+                            {"total_commits": 5, "commits": COPYBARA_COMMITS},
+                            "v0.55.0")
+    assert "PiperOrigin-RevId" not in out
+    assert "- Allow configuring solver threads for QuickCheck proofs" in out
+    assert "- dslx: reject unreachable match patterns using semantic coverage" in out
+    assert "3 changes" in out
+
+
+def test_trailer_detection_does_not_eat_conventional_titles():
+    # `scope: summary` looks like `key: value`; only a capitalized,
+    # hyphenated key is a trailer.
+    commits = [_commit("Merge pull request #9 from acme/x\n\n"
+                       "verilog: make generate-label-prefix configurable"),
+               _commit("Merge pull request #10 from acme/y\n\n"
+                       "Signed-off-by: A Dev <a@example.com>")]
+    assert rn.extract_prs(commits) == [
+        ("9", "verilog: make generate-label-prefix configurable")]
+
+
+def test_squash_minority_falls_back_to_subjects():
+    # A fork whose own PRs are squash-merged but whose range is mostly
+    # cherry-picks: the three `(#N)` subjects must not hide the rest.
+    commits = [_commit("dslx: validate sums (#20)")] + [
+        _commit("Cherry-picked change {}".format(i)) for i in range(5)]
+    assert rn.extract_prs(commits) == []
+
+
+def test_pr_numbers_are_qualified_with_the_upstream_repo():
+    out = rn.render_compare(
+        "verible-bin", "1", "https://github.com/acme/verible/releases/tag/v1",
+        COMPARE, "v0")
+    assert "- acme/verible#2586 verilog:" in out
+    assert "- #2586" not in out
+
+
+def test_squash_refs_in_subjects_are_qualified():
+    commits = [_commit("dslx: validate sums (#20)")] + [
+        _commit("Cherry-picked change {}".format(i)) for i in range(5)]
+    out = rn.render_compare(
+        "xlsynth-bin", "1", "https://github.com/xlsynth/xlsynth/releases/tag/v1",
+        {"total_commits": 6, "commits": commits}, "v0")
+    assert "- dslx: validate sums (xlsynth/xlsynth#20)" in out
+
+
 def test_extract_commit_subjects_filters_noise():
     subjects = rn.extract_commit_subjects(MERGE_COMMITS)
     assert not any(s.startswith("Merge ") for s in subjects)

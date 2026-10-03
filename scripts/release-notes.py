@@ -147,6 +147,15 @@ COMPARE_SENTINEL = "gh-compare"
 _MERGE_PR_RE = re.compile(r"^Merge pull request #(\d+) from ")
 # `Fix the thing (#2592)` — the squash-merge subject shape.
 _SQUASH_PR_RE = re.compile(r"^(.*?)\s*\(#(\d+)\)\s*$")
+# A git trailer line: `PiperOrigin-RevId: 980085178`, `Signed-off-by: …`,
+# `Change-Id: I…`. The key must be capitalized AND hyphenated -- that is what
+# separates a trailer from a conventional title like `verilog: make x
+# configurable`, which is also `word: text`.
+_TRAILER_RE = re.compile(r"^[A-Z][A-Za-z0-9]*(?:-[A-Za-z0-9]+)+:\s")
+# https://github.com/<owner>/<repo>/... -> owner/repo
+_GITHUB_SLUG_RE = re.compile(r"^https?://github\.com/([^/\s]+/[^/\s]+?)(?:\.git)?/")
+# A trailing `(#123)` squash reference inside a commit subject.
+_SQUASH_REF_RE = re.compile(r"\(#(\d+)\)\s*$")
 # Commit subjects that carry no information for a reader of release notes.
 _NOISE_RE = re.compile(
     r"^(Merge (branch|remote-tracking branch|origin/|pull request)"
@@ -172,6 +181,22 @@ def extract_prs(commits):
     history produced exactly that, listing one change twice under two numbers.
     So: if any merge-commit PRs were found, they are the answer.
 
+    A merge whose body opens with a git trailer instead of a title is NOT a
+    PR entry. That is the shape of an IMPORTED merge -- Copybara bringing a
+    google/xls pull request into the xlsynth fork writes
+
+        Merge pull request #4881 from mag-mga:mag-mga/select-to-xor
+        <blank>
+        PiperOrigin-RevId: 980085178
+
+        -- and the number belongs to another repository, the title does not
+    exist, and the merged branch's own commits are in the range anyway. Letting
+    such merges "win wholesale" turned a 95-commit xlsynth window into seven
+    `PiperOrigin-RevId:` lines and dropped everything else. Skipped, they leave
+    the commit-subject fallback to do its job. A merge whose body is simply
+    EMPTY is still kept as "(no title)": that is a stripped merge of this
+    repo's own PR, not an import.
+
     Dedupes by number, preserving the order GitHub returned (oldest first).
     """
     merged, squashed = [], []
@@ -185,6 +210,8 @@ def extract_prs(commits):
         m = _MERGE_PR_RE.match(subject)
         if m:
             title = next((ln.strip() for ln in lines[1:] if ln.strip()), "")
+            if _TRAILER_RE.match(title):
+                continue
             if not title:
                 # A merge commit whose body was stripped tells us nothing more
                 # than the number; keep it rather than dropping the PR.
@@ -195,6 +222,21 @@ def extract_prs(commits):
         m = _SQUASH_PR_RE.match(subject)
         if m and m.group(1).strip():
             squashed.append((m.group(2), m.group(1).strip()))
+
+    # Squash shapes describe the range only if the range IS squash merges. A
+    # fork that squash-merges its own PRs but takes most changes as plain
+    # cherry-picks (xlsynth: 12 `(#N)` subjects among 88 commits, one of them
+    # the only commit adding a new CLI flag) would otherwise lose most of its
+    # history to the dozen PRs that happen to carry a number. Below half, the
+    # commit-subject fallback describes the range better.
+    if not merged and squashed:
+        meaningful = [
+            c for c in commits
+            if not _NOISE_RE.match(
+                (((c.get("commit") or {}).get("message") or "").splitlines() or [""])[0])
+        ]
+        if len(squashed) * 2 < len(meaningful):
+            squashed = []
 
     out, seen = [], set()
     for number, title in (merged or squashed):
@@ -228,14 +270,20 @@ def render_compare(package, version, upstream_url, compare, previous_ref,
     total = compare.get("total_commits", len(commits))
     compare_url = compare.get("html_url") or ""
 
+    # `#N` must name the UPSTREAM repository: a bare `#2586` in this package's
+    # release body is autolinked by GitHub to this package's own issue #2586.
+    m = _GITHUB_SLUG_RE.match(upstream_url or "")
+    ref = "{}#".format(m.group(1)) if m else "#"
+
     prs = extract_prs(commits)
     if prs:
         kind = "merged pull request" + ("s" if len(prs) != 1 else "")
-        entries = ["- #{} {}".format(n, t) for n, t in prs]
+        entries = ["- {}{} {}".format(ref, n, t) for n, t in prs]
     else:
         subjects = extract_commit_subjects(commits)
         kind = "change" + ("s" if len(subjects) != 1 else "")
-        entries = ["- {}".format(s) for s in subjects]
+        entries = ["- {}".format(_SQUASH_REF_RE.sub(r"(" + ref + r"\1)", s))
+                   for s in subjects]
 
     shown = entries[:max_entries]
     hidden = len(entries) - len(shown)
