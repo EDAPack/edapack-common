@@ -63,6 +63,24 @@ on:
         required: false
         type: boolean
         default: true
+      revision:
+        description: >
+          Release track only. Republish an upstream release we already
+          published, as a PACKAGING revision: the tag becomes
+          v<upstream>.<revision> (v0.59.0 -> v0.59.0.1). For shipping a fix to
+          the package itself (a layout or consumer-contract bug) without
+          waiting for upstream to release. A fourth component, never a bumped
+          patch number: an invented v0.59.1 would collide with upstream's own
+          v0.59.1 and the release gate would then skip it as already published.
+          Use with core_ref pinned to the upstream tag being revised.
+        required: false
+        type: string
+        default: ""
+      revision_note:
+        description: "Release track, with revision: what changed in the package, for the release body."
+        required: false
+        type: string
+        default: ""
 
 permissions:
   contents: write
@@ -278,7 +296,11 @@ jobs:
             # The upstream tag *is* the identity on this track: build exactly
             # when upstream has a release we have not published. The inputs
             # digest is still recorded in the manifest, just not used as a gate.
-            if [ "$NEW_RELEASE" = true ] || [ "${{ inputs.force }}" = "true" ]; then
+            # A packaging revision is an explicit request to rebuild an upstream
+            # release we HAVE published; if that revision's tag already exists,
+            # the publish job's create step refuses it, which is the right end.
+            if [ "$NEW_RELEASE" = true ] || [ "${{ inputs.force }}" = "true" ] \
+               || [ -n "${{ inputs.revision }}" ]; then
               echo "build_needed=true" >> "$GITHUB_OUTPUT"
             else
               echo "build_needed=false" >> "$GITHUB_OUTPUT"
@@ -316,6 +338,14 @@ jobs:
           if [ "${{ inputs.track }}" = release ]; then
             # Simple, matching upstream: 5.050 / v5.050, no build-id suffix.
             version="${core_ver}"
+            revision="${{ inputs.revision }}"
+            if [ -n "$revision" ]; then
+              case "$revision" in
+                *[!0-9]*) echo "::error::revision must be a positive integer, got '$revision'"; exit 1 ;;
+              esac
+              [ "$revision" -ge 1 ] || { echo "::error::revision must be >= 1"; exit 1; }
+              version="${core_ver}.${revision}"
+            fi
           else
             # run_id, not a date: two builds can land on the same day, and every
             # published dev tag to date uses the run id.
@@ -338,10 +368,35 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           EC=packages/edapack-common
+          # A packaging revision rebuilds an upstream ref we already shipped,
+          # so the upstream-changes section would compare a ref with itself.
+          # Say what the revision IS instead; a tool repo's notes hook can
+          # still append (e.g. a behavior diff, which should come out empty).
+          if [ -n "${{ inputs.revision }}" ]; then
+            REVISION_NOTE='${{ inputs.revision_note }}' python3 - \
+                "${{ inputs.package }}" "${{ steps.version.outputs.version }}" \
+                "${{ inputs.revision }}" > release-notes.md <<'PY'
+          import json, os, sys
+          pkg, version, revision = sys.argv[1:4]
+          core = next(i for i in json.load(open("candidate.json"))["inputs"]
+                      if i["role"] == "core")
+          repo = core["repo"].rstrip("/").replace(".git", "")
+          ref = core["ref"]
+          note = os.environ.get("REVISION_NOTE", "").strip()
+          print("Automated build of {} {}.\n".format(pkg, version))
+          print("Upstream: {}/releases/tag/{}\n".format(repo, ref))
+          print("## Packaging revision\n")
+          print("Revision {} of the `{}` repack. The upstream binaries are the "
+                "same ones `{}` shipped; only the package changed.".format(
+                    revision, ref, ref))
+          if note:
+              print("\n" + note)
+          PY
+            echo "have_notes=true" >> "$GITHUB_OUTPUT"
           # The changelog path (or the gh-compare sentinel) rides along in
           # candidate.json (core.release_notes), so there is no second YAML
           # parse here. Exit 2 = no notes available.
-          if python3 "$EC/scripts/release-notes.py" \
+          elif python3 "$EC/scripts/release-notes.py" \
                --candidate candidate.json \
                --package "${{ inputs.package }}" \
                --version "${{ steps.version.outputs.version }}" \

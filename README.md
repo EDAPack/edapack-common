@@ -126,6 +126,19 @@ a week that ships a release does not also ship a redundant snapshot. Neither
 job depends on the other — the test is a pure function of upstream tags and
 published releases.
 
+### Packaging revisions
+
+A fix to the *package* (its layout, its consumer `ivpm.yaml`/`export.envrc`)
+is not an upstream release, so the release track would never pick it up.
+Dispatch the caller with `core_ref: <upstream tag>`, `revision: N` and a
+`revision_note`. The tag becomes `v<upstream>.<N>` (`v0.59.0` → `v0.59.0.1`),
+the body says the upstream binaries are unchanged and quotes the note, and the
+release takes `latest`. The revision is a fourth component, never a bumped
+patch number. An invented `v0.59.1` would later collide with upstream's own
+`v0.59.1`, and the gate would skip the real one as already published. The
+next upstream release compares against the revision's recorded upstream ref,
+so its notes are unaffected.
+
 ## Local build
 
 First fetch the shared scripts into the tool repo (one time / when they change):
