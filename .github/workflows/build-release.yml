@@ -366,6 +366,11 @@ jobs:
         if: inputs.track == 'release' && steps.gate.outputs.build_needed == 'true'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Free text, so it travels as an environment variable and is never
+          # spliced into the script: `${{ }}` substitution happens before bash
+          # parses, so a note containing a quote broke the step (the first
+          # xlsynth-bin revision did exactly that) and a crafted one would run.
+          REVISION_NOTE: ${{ inputs.revision_note }}
         run: |
           EC=packages/edapack-common
           # A packaging revision rebuilds an upstream ref we already shipped,
@@ -373,7 +378,7 @@ jobs:
           # Say what the revision IS instead; a tool repo's notes hook can
           # still append (e.g. a behavior diff, which should come out empty).
           if [ -n "${{ inputs.revision }}" ]; then
-            REVISION_NOTE='${{ inputs.revision_note }}' python3 - \
+            python3 - \
                 "${{ inputs.package }}" "${{ steps.version.outputs.version }}" \
                 "${{ inputs.revision }}" > release-notes.md <<'PY'
           import json, os, sys

@@ -151,3 +151,25 @@ def test_pipeline_scripts_referenced_by_the_workflow_exist():
             assert (root / "scripts" / script).is_file(), (
                 f"scripts/{script} is referenced by build-release.yml and is missing"
             )
+
+
+def test_free_text_inputs_never_reach_a_script_directly():
+    """`${{ inputs.X }}` in a `run:` is substituted before bash parses it.
+
+    For a free-text input that is a quoting bug at best (a note containing an
+    apostrophe broke xlsynth-bin's first packaging revision) and script
+    injection at worst. Free text must arrive through `env:`.
+    """
+    import re
+    import yaml
+    from pathlib import Path
+    wf = yaml.safe_load((Path(__file__).resolve().parents[2]
+                         / ".github/workflows/build-release.yml").read_text())
+    free_text = ("revision_note",)
+    for job_name, job in wf["jobs"].items():
+        for step in job.get("steps") or []:
+            run = step.get("run") or ""
+            for name in free_text:
+                assert not re.search(r"\$\{\{\s*inputs\." + name + r"\b", run), (
+                    "{}/{} splices inputs.{} into its script; pass it via env:"
+                    .format(job_name, step.get("name") or step.get("id"), name))
