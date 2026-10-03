@@ -5,7 +5,7 @@ name: edapack build-release
 # via ivpm (edapack-common is an ivpm dependency of each tool, fetched into
 # packages/edapack-common), and builds run in the STOCK manylinux images
 # (quay.io/pypa/*) installing their deps at build time — no custom images.
-# See https://edapack.github.io (Developer Guide → releasing).
+# See https://dvkit.org/edapack/ (Developer Guide → releasing).
 on:
   workflow_call:
     inputs:

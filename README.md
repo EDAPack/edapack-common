@@ -1,13 +1,13 @@
 # edapack-common
 
-Shared build & release infrastructure for the [edapack](https://edapack.github.io)
+Shared build & release infrastructure for the [edapack](https://dvkit.org/edapack/)
 ecosystem of pre-built open-source EDA tool binaries. This repo is the single
 source of truth for the logic every `*-bin` tool repo shares, so that build
 behavior stays identical by construction instead of by copy-paste.
 
 See **[design](../BUILD_CENTRALIZATION_DESIGN.md)** and
 **[plan](../BUILD_CENTRALIZATION_PLAN.md)** for the full rationale, and the
-[Developer Guide](https://edapack.github.io) for how-tos.
+[Developer Guide](https://dvkit.org/edapack/) for how-tos.
 
 ## What's here
 
