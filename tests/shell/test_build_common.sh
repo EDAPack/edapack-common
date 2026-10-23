@@ -177,5 +177,28 @@ YAML
 ) && ok "ec_stage_release_ivpm rejects a manifest with no package block" \
   || bad "ec_stage_release_ivpm structure guard"
 
+# --- ec_platform_json: MSYS2 reports os=windows and the environment's CRT ----
+# uname is stubbed: these run on Linux. Under MSYS2, uname -s is MINGW64_NT-*
+# even in UCRT64, and ldd would report the Cygwin runtime as a "glibc".
+(
+    uname() { case "$1" in -s) echo MINGW64_NT-10.0-26100 ;; -m) echo x86_64 ;; esac; }
+    MSYSTEM=UCRT64 EC_IMAGE_NAME=windows-x86_64 ec_platform_json "$SANDBOX/plat-ucrt.json"
+    python3 - "$SANDBOX/plat-ucrt.json" <<'PY'
+import json, sys
+assert json.load(open(sys.argv[1])) == {"os": "windows", "arch": "x86_64", "libc": "ucrt", "image": "windows-x86_64"}
+PY
+) && ok "ec_platform_json: MSYS2 UCRT64 -> os=windows libc=ucrt" || bad "ec_platform_json UCRT64"
+
+(
+    uname() { case "$1" in -s) echo MINGW64_NT-10.0-26100 ;; -m) echo x86_64 ;; esac; }
+    MSYSTEM=MINGW64 EC_IMAGE_NAME=windows-x86_64 ec_platform_json "$SANDBOX/plat-mingw.json"
+    python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); assert (d["os"], d["libc"]) == ("windows", "msvcrt"), d' "$SANDBOX/plat-mingw.json"
+) && ok "ec_platform_json: MSYS2 MINGW64 -> libc=msvcrt" || bad "ec_platform_json MINGW64"
+
+(
+    EC_IMAGE_NAME=manylinux_2_28_x86_64 ec_platform_json "$SANDBOX/plat-linux.json"
+    python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); assert d["libc"] == "glibc_2.28" and d["os"] != "windows", d' "$SANDBOX/plat-linux.json"
+) && ok "ec_platform_json: manylinux unchanged" || bad "ec_platform_json manylinux"
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

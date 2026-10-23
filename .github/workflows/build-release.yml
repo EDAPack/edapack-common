@@ -21,11 +21,16 @@ on:
       targets:
         description: >
           Rich build matrix (overrides `images`): JSON array of objects
-          {name, runs-on, kind: docker|native, image?}. Use for aarch64
-          (kind=docker on an arm runner) and macOS (kind=native). Example:
+          {name, runs-on, kind: docker|native|msys2, image?, msystem?,
+          optional?}. Use for aarch64 (kind=docker on an arm runner), macOS
+          (kind=native) and Windows (kind=msys2, on a windows runner; msystem
+          defaults to UCRT64, and the package list comes from the package's
+          scripts/msys2-packages.txt). `optional: true` lets that target fail
+          without failing the run; publish ships whatever assets exist. Example:
           [{"name":"manylinux_2_28_x86_64","runs-on":"ubuntu-latest","kind":"docker","image":"quay.io/pypa/manylinux_2_28_x86_64"},
            {"name":"manylinux_2_28_aarch64","runs-on":"ubuntu-24.04-arm","kind":"docker","image":"quay.io/pypa/manylinux_2_28_aarch64"},
-           {"name":"macos-arm64","runs-on":"macos-14","kind":"native"}]
+           {"name":"macos-arm64","runs-on":"macos-14","kind":"native"},
+           {"name":"windows-x86_64","runs-on":"windows-latest","kind":"msys2","optional":true}]
         required: false
         type: string
         default: ""
@@ -426,13 +431,21 @@ jobs:
   # build: one job per target. Linux targets (kind=docker) `docker run` the
   # stock quay.io/pypa image (deps installed at build time) — on x86_64 (ubuntu-
   # latest) or aarch64 (an arm runner). macOS targets (kind=native) run build.sh
-  # directly on the runner. We `docker run` rather than `container:` because
-  # actions' node20 needs glibc >= 2.28 and would fail inside manylinux2014.
+  # directly on the runner. Windows targets (kind=msys2) run build.sh in an
+  # MSYS2 shell (msystem, default UCRT64). We `docker run` rather than
+  # `container:` because actions' node20 needs glibc >= 2.28 and would fail
+  # inside manylinux2014.
+  #
+  # `optional: true` on a target makes its leg continue-on-error: a failure is
+  # reported but does not fail `build`, so `publish` still runs and ships the
+  # assets that do exist. It exists for Windows, whose MinGW build once stalled
+  # every release for eight weeks (verilator-bin docs/design/windows.md).
   # --------------------------------------------------------------------- #
   build:
     needs: resolve
     if: needs.resolve.outputs.build_needed == 'true'
     runs-on: ${{ matrix.target.runs-on }}
+    continue-on-error: ${{ matrix.target.optional == true }}
     strategy:
       fail-fast: false
       matrix:
@@ -447,10 +460,21 @@ jobs:
           python-version: "3.12"
 
       - name: Fetch edapack-common via ivpm
+        if: matrix.target.kind != 'msys2'
         run: |
           pip install ivpm
           ivpm update -a --skip-py-install
           test -f packages/edapack-common/scripts/build-common.sh
+
+      # Windows: ivpm's package cache needs symlinks, which a Windows runner
+      # does not grant, and the build needs only edapack-common's scripts --
+      # the same default branch ivpm would fetch.
+      - name: Fetch edapack-common (Windows)
+        if: matrix.target.kind == 'msys2'
+        uses: actions/checkout@v4
+        with:
+          repository: edapack/edapack-common
+          path: packages/edapack-common
 
       - uses: actions/download-artifact@v4
         with:
@@ -518,6 +542,44 @@ jobs:
           export LDFLAGS="-L$brew_flex/lib${LDFLAGS:+ $LDFLAGS}"
           export CPPFLAGS="-I$brew_flex/include${CPPFLAGS:+ $CPPFLAGS}"
           "$FLEX" --version && "$BISON" --version | head -1
+          bash scripts/build.sh
+          ls -l dist/
+
+      - name: MSYS2 package list (Windows)
+        if: matrix.target.kind == 'msys2'
+        shell: bash
+        run: |
+          f=scripts/msys2-packages.txt
+          test -f "$f" || { echo "::error::kind=msys2 needs $f in the package repo"; exit 1; }
+          echo "MSYS2_PACKAGES=$(grep -v '^[[:space:]]*#' "$f" | xargs)" >> "$GITHUB_ENV"
+
+      - uses: msys2/setup-msys2@v2
+        if: matrix.target.kind == 'msys2'
+        with:
+          msystem: ${{ matrix.target.msystem || 'UCRT64' }}
+          update: false
+          install: ${{ env.MSYS2_PACKAGES }}
+
+      - name: Build (msys2 — Windows)
+        if: matrix.target.kind == 'msys2'
+        shell: msys2 {0}
+        env:
+          EC_PACKAGE: ${{ inputs.package }}
+          EC_VERSION: ${{ needs.resolve.outputs.version }}
+          EC_TAG: ${{ needs.resolve.outputs.tag }}
+          EC_TRIGGER: ${{ github.event_name == 'schedule' && 'schedule' || (github.event_name == 'workflow_dispatch' && 'workflow_dispatch' || 'push') }}
+          EC_IMAGE_NAME: ${{ matrix.target.name }}
+          EC_TRACK: ${{ inputs.track }}
+          core_ref: ${{ inputs.core_ref }}
+          input_overrides: ${{ inputs.input_overrides }}
+        run: |
+          set -o pipefail
+          ws="$(cygpath -u "$GITHUB_WORKSPACE")"
+          mkdir -p "$ws/dist"
+          export SRC_DIR="$ws" WORK_DIR="$(cygpath -u "$RUNNER_TEMP")/ecwork" OUT_DIR="$ws/dist"
+          export EC_COMMON="$ws/packages/edapack-common"
+          export CANDIDATE_JSON="$ws/candidate.json"
+          export EC_RECIPE_SHA="$(git -C "$ws" rev-parse HEAD)"
           bash scripts/build.sh
           ls -l dist/
 

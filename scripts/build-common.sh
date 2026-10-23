@@ -226,18 +226,34 @@ ec_platform_json() {
     local out="$1" arch os libc image
     os="$(uname -s | tr '[:upper:]' '[:lower:]')"
     arch="$(uname -m)"
-    case "${EC_IMAGE_NAME:-}" in
-        manylinux*2_28*) libc="glibc_2.28"; image="quay.io/pypa/${EC_IMAGE_NAME}" ;;
-        manylinux*2_34*) libc="glibc_2.34"; image="quay.io/pypa/${EC_IMAGE_NAME}" ;;
-        manylinux*2014*) libc="glibc_2.17"; image="quay.io/pypa/${EC_IMAGE_NAME}" ;;
-        *)
-            # native build (e.g. macOS) or unknown image
+    case "$os" in
+        mingw*|msys*|cygwin*)
+            # MSYS2/Cygwin: uname -s is eg MINGW64_NT-10.0-26100 (under UCRT64
+            # too), and `ldd` there reports the Cygwin runtime, not a libc. Name
+            # the OS, and record the MSYS2 environment's C runtime instead.
+            os="windows"
             image="${EC_IMAGE_NAME:-native}"
-            if [ "$os" = "darwin" ]; then
-                libc=""
-            else
-                libc="$(ldd --version 2>/dev/null | head -1 | grep -oE '[0-9]+\.[0-9]+' | head -1 | sed 's/^/glibc_/' || echo unknown)"
-            fi
+            case "${MSYSTEM:-}" in
+                UCRT64|CLANG64|CLANGARM64) libc="ucrt" ;;
+                MINGW64|MINGW32)           libc="msvcrt" ;;
+                *)                         libc="" ;;
+            esac
+            ;;
+        *)
+            case "${EC_IMAGE_NAME:-}" in
+                manylinux*2_28*) libc="glibc_2.28"; image="quay.io/pypa/${EC_IMAGE_NAME}" ;;
+                manylinux*2_34*) libc="glibc_2.34"; image="quay.io/pypa/${EC_IMAGE_NAME}" ;;
+                manylinux*2014*) libc="glibc_2.17"; image="quay.io/pypa/${EC_IMAGE_NAME}" ;;
+                *)
+                    # native build (e.g. macOS) or unknown image
+                    image="${EC_IMAGE_NAME:-native}"
+                    if [ "$os" = "darwin" ]; then
+                        libc=""
+                    else
+                        libc="$(ldd --version 2>/dev/null | head -1 | grep -oE '[0-9]+\.[0-9]+' | head -1 | sed 's/^/glibc_/' || echo unknown)"
+                    fi
+                    ;;
+            esac
             ;;
     esac
     python3 - "$out" "$os" "$arch" "$libc" "$image" <<'PY'
